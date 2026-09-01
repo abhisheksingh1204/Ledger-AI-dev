@@ -8,12 +8,14 @@
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
     "migrate:latest": "knex --knexfile knexfile.js migrate:latest",
-    "migrate:rollback": "knex --knexfile knexfile.js migrate:rollback"
-    ,"test:phase3": "node --test test/reconciliation.service.test.js"
-    ,"test:phase4": "node --test test/aiFinance.service.test.js"
-    ,"test:phase5": "node --test test/reconciliation.service.test.js test/aiFinance.service.test.js test/reporting.service.test.js test/knowledge.service.test.js"
+    "migrate:rollback": "knex --knexfile knexfile.js migrate:rollback",
+    "test:phase3": "node --test test/reconciliation.service.test.js",
+    "test:phase4": "node --test test/aiFinance.service.test.js",
+    "test:phase2": "node --test test/geminiOcr.service.test.js",
+    "test:phase5": "node --test test/reconciliation.service.test.js test/aiFinance.service.test.js test/reporting.service.test.js test/knowledge.service.test.js test/geminiOcr.service.test.js"
   },
   "dependencies": {
+    "@google/genai": "^2.20.0",
     "cloudinary": "^2.7.0",
     "cors": "^2.8.5",
     "decimal.js": "^10.4.3",

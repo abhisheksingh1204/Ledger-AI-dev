@@ -6,8 +6,9 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from services.ocr_service import OcrServiceError, process_document
-from schemas import ProcessDocumentRequest
+from services.document_repository import get_document_by_id
+from services.ocr_service import OcrServiceError, _build_extracted_payload, process_document
+from schemas import ParseDocumentTextRequest, ProcessDocumentRequest
 
 app = FastAPI(title="Finance Controller OCR Service", version="1.0.0")
 
@@ -52,6 +53,26 @@ def process_document_route(
             status_code=exc.status_code,
             detail=detail,
         ) from exc
+    except LookupError as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "DOCUMENT_NOT_FOUND", "message": str(exc)},
+        ) from exc
+
+
+@app.post("/internal/parse-document-text")
+def parse_document_text_route(
+    payload: ParseDocumentTextRequest,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    _validate_internal_token(x_internal_token)
+
+    try:
+        document = get_document_by_id(payload.documentId)
+        return {
+            "success": True,
+            "data": _build_extracted_payload(document, payload.rawText, payload.pages),
+        }
     except LookupError as exc:
         raise HTTPException(
             status_code=404,

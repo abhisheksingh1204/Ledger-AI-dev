@@ -9,6 +9,12 @@ class ProcessDocumentRequest(BaseModel):
     documentId: str = Field(..., min_length=1)
 
 
+class ParseDocumentTextRequest(BaseModel):
+    documentId: str = Field(..., min_length=1)
+    rawText: str = Field(..., min_length=1)
+    pages: list[dict] = Field(default_factory=list)
+
+
 class ErrorResponse(BaseModel):
     success: bool = False
     error: dict

@@ -8,6 +8,7 @@ const {
   storeDocumentExtraction,
   updateDocumentProcessingStatus
 } = require('./document.service');
+const { extractWithGemini } = require('./geminiOcr.service');
 
 const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8001';
 const OCR_SERVICE_INTERNAL_TOKEN = process.env.OCR_SERVICE_INTERNAL_TOKEN || '';
@@ -95,7 +96,15 @@ async function callOcrService(document) {
       );
     }
 
-    return payload.data;
+    return {
+      ...payload.data,
+      ocr_provider: 'ocr.space',
+      ocr: {
+        ...(payload.data.ocr || {}),
+        provider: 'ocr.space',
+        fallback_used: false
+      }
+    };
   } catch (error) {
     if (error.name === 'AbortError') {
       throw new AppError(
@@ -114,6 +123,141 @@ async function callOcrService(document) {
         );
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function isFallbackEligible(error) {
+  return [
+    'OCR_PROVIDER_ERROR',
+    'OCR_MALFORMED_RESPONSE',
+    'OCR_EMPTY_RESULT',
+    'OCR_API_TIMEOUT',
+    'OCR_SERVICE_TIMEOUT',
+    'OCR_RATE_LIMITED'
+  ].includes(error?.code);
+}
+
+function safeProviderReason(error) {
+  return error?.code || 'PROVIDER_ERROR';
+}
+
+async function downloadForGemini(document) {
+  const url = document.cloudinary_secure_url || document.cloudinary_url;
+  if (!url) throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Cloudinary URL is missing for this document.', 502);
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OCR_SERVICE_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok) throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Failed to download document from Cloudinary.', 502);
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    if (error.name === 'AbortError') throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Cloudinary document download timed out.', 504);
+    throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Failed to download document from Cloudinary.', 502);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function parseGeminiText(document, ocrResult) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), OCR_SERVICE_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${OCR_SERVICE_URL}/internal/parse-document-text`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(OCR_SERVICE_INTERNAL_TOKEN ? { 'X-Internal-Token': OCR_SERVICE_INTERNAL_TOKEN } : {})
+      },
+      body: JSON.stringify({
+        documentId: document.document_id,
+        rawText: ocrResult.raw_text,
+        pages: ocrResult.pages
+      }),
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.success) {
+      throw new AppError(payload?.error?.code || 'OCR_PARSE_SERVICE_ERROR', payload?.error?.message || 'OCR parser failed.', 502);
+    }
+    return {
+      ...payload.data,
+      ocr_provider: 'gemini',
+      ocr: {
+        ...(payload.data.ocr || {}),
+        provider: 'gemini',
+        fallback_used: true,
+        model: ocrResult.metadata?.model
+      }
+    };
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    if (error.name === 'AbortError') throw new AppError('OCR_PARSE_SERVICE_TIMEOUT', 'OCR parser timed out.', 504);
+    throw new AppError('OCR_PARSE_SERVICE_UNAVAILABLE', 'OCR parser is unavailable.', 503);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function callGeminiFallback(document, primaryError) {
+  await insertAuditLog({
+    action: 'OCR_FALLBACK_STARTED',
+    tableName: 'documents',
+    recordId: document.id,
+    userId: document.user_id,
+    newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', fallbackProvider: 'gemini', failureCode: safeProviderReason(primaryError) }
+  });
+
+  try {
+    const buffer = await downloadForGemini(document);
+    const ocrResult = await extractWithGemini({
+      buffer,
+      mimeType: document.mime_type || 'application/octet-stream',
+      documentType: document.document_type
+    });
+    const extraction = await parseGeminiText(document, ocrResult);
+    console.info('Gemini OCR succeeded for documentId=%s', document.document_id);
+    await insertAuditLog({
+      action: 'OCR_FALLBACK_COMPLETED',
+      tableName: 'documents',
+      recordId: document.id,
+      userId: document.user_id,
+      newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', fallbackProvider: 'gemini' }
+    });
+    return extraction;
+  } catch (fallbackError) {
+    await insertAuditLog({
+      action: 'OCR_FALLBACK_FAILED',
+      tableName: 'documents',
+      recordId: document.id,
+      userId: document.user_id,
+      newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', fallbackProvider: 'gemini', failureCode: safeProviderReason(fallbackError) }
+    });
+    if (fallbackError.code === 'CLOUDINARY_DOWNLOAD_FAILED') throw fallbackError;
+    throw new AppError(
+      'OCR_ALL_PROVIDERS_FAILED',
+      'All OCR providers failed to extract this document.',
+      502,
+      { providers: [{ provider: 'ocr.space', reason: safeProviderReason(primaryError) }, { provider: 'gemini', reason: safeProviderReason(fallbackError) }] }
+    );
+  }
+}
+
+async function callOcrWithFallback(document) {
+  try {
+    return await callOcrService(document);
+  } catch (primaryError) {
+    if (!isFallbackEligible(primaryError)) throw primaryError;
+    console.warn('OCR.Space failed for documentId=%s reason=%s fallback=gemini', document.document_id, safeProviderReason(primaryError));
+    await insertAuditLog({
+      action: 'OCR_PRIMARY_FAILED',
+      tableName: 'documents',
+      recordId: document.id,
+      userId: document.user_id,
+      newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', failureCode: safeProviderReason(primaryError) }
+    });
+    return callGeminiFallback(document, primaryError);
   }
 }
 
@@ -261,7 +405,7 @@ async function processSingleDocument(documentId, userId) {
   await updateDocumentProcessingStatus(document.id, 'OCR_PROCESSING');
 
   try {
-    const extraction = await callOcrService(document);
+    const extraction = await callOcrWithFallback(document);
 
     await updateDocumentProcessingStatus(document.id, 'EXTRACTING');
     const persistedDocument = await persistExtraction(document, extraction);
@@ -345,6 +489,9 @@ async function processSessionDocuments(sessionId, userId) {
 }
 
 module.exports = {
+  callGeminiFallback,
+  callOcrService,
+  callOcrWithFallback,
   processSessionDocuments,
   processSingleDocument
 };

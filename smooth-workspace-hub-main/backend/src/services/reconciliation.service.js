@@ -76,6 +76,7 @@ function findPaymentCombination(invoice, candidates, limit = 3) {
 async function runReconciliation(sessionId, userId) {
   const session = await db('reconciliation_sessions').where({ session_id: sessionId, user_id: userId }).first();
   if (!session) { const e = new Error('Reconciliation session not found.'); e.statusCode = 404; throw e; }
+  if (session.status === 'RECONCILED') { const e = new Error('This reconciliation session has already been completed.'); e.code = 'RECONCILIATION_ALREADY_COMPLETED'; e.statusCode = 409; throw e; }
   const invoices = await db('invoices').where({ session_id: session.id, user_id: userId });
   const transactions = await db('bank_transactions').where({ session_id: session.id, user_id: userId }).whereIn('status', ['PENDING', 'EXTRACTED']);
   const results = [];
@@ -100,7 +101,7 @@ async function runReconciliation(sessionId, userId) {
       if (grouped) {
         const total = grouped.transactions.reduce((sum, t) => sum.plus(t.amount || 0), new Decimal(0));
         best = { t: grouped.transactions[0], transactions: grouped.transactions, scores: grouped.scores, difference: total.minus(invoice.amount || 0).abs(), referenceExact: grouped.scores.reference === 100, days: Math.max(...grouped.transactions.map((t) => daysBetween(invoice.invoice_date, t.transaction_date))), warnings: [] };
-        best.warnings.push({ type: 'MULTI_TRANSACTION_MATCH', severity: 'LOW', transactionIds: grouped.transactions.map((t) => t.transaction_id), paidAmount: total.toFixed(2) });
+        best.warnings.push({ type: 'MULTI_TRANSACTION_MATCH', severity: 'LOW', transactionIds: grouped.transactions.map((t) => t.id), transactionReferences: grouped.transactions.map((t) => t.transaction_id), paidAmount: total.toFixed(2) });
       }
       if (ranked.length > 1 && ranked[1].scores.confidence >= CONFIG.review) best.warnings.push({ type: 'MULTIPLE_POSSIBLE_MATCHES', severity: 'HIGH' });
       const auto = best.scores.amount === 100 && best.referenceExact;
@@ -109,21 +110,22 @@ async function runReconciliation(sessionId, userId) {
       if (matchType !== 'AUTO_MATCH') best.warnings.push({ type: 'LOW_CONFIDENCE_MATCH', severity: 'MEDIUM' });
       const transactionIds = (best.transactions || [best.t]).map((t) => t.id);
       await trx('reconciliation_matches').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, transaction_id: best.t.id, amount_score: best.scores.amount, reference_score: best.scores.reference, name_score: best.scores.name, date_score: best.scores.date, confidence_score: best.scores.confidence, amount_difference: best.difference.toFixed(2), match_type: matchType, status: matchType === 'AUTO_MATCH' || matchType === 'MULTI_TRANSACTION_MATCH' ? 'MATCHED' : 'PENDING_REVIEW', reason: { scores: best.scores, warnings: best.warnings, days: best.days, transactionIds } });
-      if (matchType === 'AUTO_MATCH' || matchType === 'MULTI_TRANSACTION_MATCH') transactionIds.forEach((id) => used.add(id));
+       transactionIds.forEach((id) => used.add(id));
       for (const warning of best.warnings) {
         for (const transactionId of transactionIds) await trx('exceptions').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, transaction_id: transactionId, exception_type: warning.type, severity: warning.severity || 'MEDIUM', description: JSON.stringify({ ...warning, outstanding: partial ? new Decimal(invoice.amount || 0).minus(best.t.amount || 0).toFixed(2) : undefined }) });
         await trx('audit_log').insert({ action: 'RECONCILIATION_EXCEPTION_CREATED', table_name: 'exceptions', user_id: userId, new_value: { runId: run.run_id, invoiceId: invoice.invoice_id, transactionIds, exceptionType: warning.type, severity: warning.severity || 'MEDIUM' } });
       }
       const strongAlternates = ranked.filter((candidate) => candidate.t.id !== best.t.id && (candidate.scores.amount === 100 && candidate.referenceExact || candidate.scores.confidence >= CONFIG.auto));
       for (const alternate of strongAlternates) {
-        const warning = { type: 'POSSIBLE_DUPLICATE_PAYMENT', severity: 'HIGH', transactionIds: [best.t.transaction_id, alternate.t.transaction_id] };
+         const warning = { type: 'POSSIBLE_DUPLICATE_PAYMENT', severity: 'HIGH', transactionIds: [best.t.id, alternate.t.id], transactionReferences: [best.t.transaction_id, alternate.t.transaction_id] };
         await trx('exceptions').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, transaction_id: alternate.t.id, exception_type: warning.type, severity: warning.severity, description: JSON.stringify(warning) });
         await trx('audit_log').insert({ action: 'RECONCILIATION_EXCEPTION_CREATED', table_name: 'exceptions', user_id: userId, new_value: { runId: run.run_id, invoiceId: invoice.invoice_id, transactionIds: warning.transactionIds, exceptionType: warning.type, severity: warning.severity } });
       }
       await trx('audit_log').insert({ action: matchType === 'AUTO_MATCH' ? 'AUTO_MATCH_CREATED' : 'MANUAL_REVIEW_REQUIRED', table_name: 'reconciliation_matches', user_id: userId, new_value: { sessionId, invoiceId: invoice.invoice_id, transactionId: best.t.transaction_id, confidence: best.scores.confidence } });
       results.push({ invoiceId: invoice.invoice_id, transactionId: best.t.transaction_id, matchType, confidence: best.scores.confidence, scores: best.scores, amountDifference: best.difference.toFixed(2), warnings: best.warnings });
     }
-    await trx('reconciliation_runs').where({ id: run.id }).update({ status: 'COMPLETED', completed_at: trx.fn.now() });
+     await trx('reconciliation_runs').where({ id: run.id }).update({ status: 'COMPLETED', completed_at: trx.fn.now() });
+     await trx('reconciliation_sessions').where({ id: session.id, user_id: userId }).update({ status: 'RECONCILED', updated_at: trx.fn.now() });
     await trx('audit_log').insert({ action: 'RECONCILIATION_COMPLETED', table_name: 'reconciliation_runs', record_id: run.id, user_id: userId, new_value: { sessionId } });
   });
   return { totalInvoices: invoices.length, autoMatched: results.filter((r) => r.matchType === 'AUTO_MATCH').length, manualReview: results.filter((r) => r.matchType === 'MANUAL_REVIEW').length, unmatched: results.filter((r) => r.matchType === 'UNMATCHED').length, results };
