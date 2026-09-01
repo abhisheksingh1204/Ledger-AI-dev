@@ -6,14 +6,14 @@ import { WorkspaceBackground } from "@/components/site/BackgroundLayer";
 import { Footer } from "@/components/site/Footer";
 import { Header } from "@/components/site/Header";
 import { EASE_PREMIUM } from "@/lib/site";
-import { askInvoice, getInvoices } from "@/lib/financeApi";
+import { askInvoice, getInvoices, type InvoiceReport, type SourceCitation } from "@/lib/financeApi";
 
 export const Route = createFileRoute("/qa")({ component: QAPage });
 
-type Message = { role: "user" | "ai"; text: string; sources?: Array<Record<string, unknown>> };
+type Message = { role: "user" | "ai"; text: string; sources?: SourceCitation[] };
 
 function QAPage() {
-  const [invoices, setInvoices] = useState<Array<Record<string, unknown>>>([]);
+  const [invoices, setInvoices] = useState<InvoiceReport[]>([]);
   const [invoiceId, setInvoiceId] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [draft, setDraft] = useState("");
@@ -49,7 +49,11 @@ function QAPage() {
       setConversationId(response.conversationId);
       setMessages((current) => [
         ...current,
-        { role: "ai", text: response.answer, sources: response.sources },
+        {
+          role: "ai",
+          text: response.answer,
+          ...(response.sources ? { sources: response.sources } : {}),
+        },
       ]);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : "The AI request failed.");

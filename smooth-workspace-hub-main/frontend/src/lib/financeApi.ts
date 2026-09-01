@@ -1,8 +1,8 @@
-const API_BASE_URL = (import.meta.env.VITE_BACKEND_URL || "http://localhost:5000").replace(
+const API_BASE_URL = (import.meta.env["VITE_BACKEND_URL"] || "http://localhost:5000").replace(
   /\/$/,
   "",
 );
-const USER_ID = import.meta.env.VITE_USER_ID || "demo-user";
+const USER_ID = import.meta.env["VITE_USER_ID"] || "demo-user";
 
 type ApiEnvelope<T> = {
   success?: boolean;
@@ -56,6 +56,20 @@ export type ReportOverview = {
   exceptions: Record<string, { count: number; amount?: string }>;
 };
 
+export type InvoiceReport = {
+  invoiceId?: string;
+  invoiceNumber?: string;
+  customerName?: string;
+  [key: string]: unknown;
+};
+
+export type SourceCitation = {
+  url?: string;
+  title?: string;
+  publisher?: string;
+  [key: string]: unknown;
+};
+
 export async function createSession() {
   return request<{ success: true; session: { sessionId: string; status: string } }>(
     "/api/reconciliation/sessions",
@@ -99,7 +113,7 @@ export async function runReconciliation(sessionId: string) {
 export async function getReports() {
   return request<{
     success: true;
-    data: { overview: ReportOverview; invoices: { items: Array<Record<string, unknown>> } };
+    data: { overview: ReportOverview; invoices: { items: InvoiceReport[] } };
   }>("/api/reports");
 }
 
@@ -107,7 +121,7 @@ export async function askInvoice(invoiceId: string, question: string, conversati
   return request<{
     success: true;
     answer: string;
-    citations?: Array<Record<string, unknown>>;
+    sources?: SourceCitation[];
     conversationId?: string;
   }>(`/api/ai/invoice/${encodeURIComponent(invoiceId)}/question`, {
     method: "POST",
@@ -116,7 +130,5 @@ export async function askInvoice(invoiceId: string, question: string, conversati
 }
 
 export async function getInvoices() {
-  return request<{ success: true; data: { items: Array<Record<string, unknown>> } }>(
-    "/api/reports/invoices",
-  );
+  return request<{ success: true; data: { items: InvoiceReport[] } }>("/api/reports/invoices");
 }
