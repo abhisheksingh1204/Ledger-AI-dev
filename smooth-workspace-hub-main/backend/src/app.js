@@ -7,6 +7,8 @@ const reconciliationRoutes = require('./routes/reconciliation.routes');
 const documentRoutes = require('./routes/document.routes');
 const processingRoutes = require('./routes/processing.routes');
 const aiRoutes = require('./routes/ai.routes');
+const reportingRoutes = require('./routes/reporting.routes');
+const knowledgeRoutes = require('./routes/knowledge.routes');
 const errorMiddleware = require('./middleware/error.middleware');
 
 const app = express();
@@ -33,6 +35,8 @@ app.use('/api/reconciliation', reconciliationRoutes);
 app.use('/api/documents', documentRoutes);
 app.use('/api/v1', processingRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/reports', reportingRoutes);
+app.use('/api/knowledge', knowledgeRoutes);
 
 app.use((req, res, next) => {
   next(new AppError('NOT_FOUND', 'Route not found.', 404));

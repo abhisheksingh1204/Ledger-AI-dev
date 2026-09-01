@@ -11,6 +11,7 @@
     "migrate:rollback": "knex --knexfile knexfile.js migrate:rollback"
     ,"test:phase3": "node --test test/reconciliation.service.test.js"
     ,"test:phase4": "node --test test/aiFinance.service.test.js"
+    ,"test:phase5": "node --test test/reconciliation.service.test.js test/aiFinance.service.test.js test/reporting.service.test.js test/knowledge.service.test.js"
   },
   "dependencies": {
     "cloudinary": "^2.7.0",
