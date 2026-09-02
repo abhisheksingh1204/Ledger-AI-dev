@@ -2,7 +2,7 @@ import requests
 import pytest
 from unittest.mock import Mock, patch
 
-from services.ocr_service import OcrServiceError, _call_ocr_space
+from services.ocr_service import OcrServiceError, _call_ocr_space, _call_paddle_ocr, score_semantic_similarity
 
 
 def response(payload, status=200):
@@ -62,3 +62,40 @@ def test_http_error_and_no_fallback_for_key_or_rate_limit():
             with pytest.raises(OcrServiceError) as caught:
                 _call_ocr_space(b'bytes', 'invoice.png', 'image/png')
         assert caught.value.code == code
+
+
+def test_paddle_ocr_preserves_page_order_and_raw_text():
+    paddle = Mock()
+    paddle.predict.return_value = [
+        [
+            [[[0, 0], [10, 0], [10, 10], [0, 10]], ('Header', 0.99)],
+            [[[0, 20], [10, 20], [10, 30], [0, 30]], ('Total 100', 0.98)],
+        ]
+    ]
+
+    with patch('services.ocr_service._get_paddle_ocr', return_value=paddle), \
+        patch('services.ocr_service._render_document_pages', return_value=[(1, b'page-bytes', 'image/png')]), \
+        patch('services.ocr_service._image_bytes_to_array', return_value=Mock()):
+        raw_text, pages = _call_paddle_ocr(b'bytes', 'invoice.png', 'image/png', document_id='DOC-1')
+
+    assert raw_text == 'Header\nTotal 100'
+    assert pages == [{'page_number': 1, 'parsed_text': 'Header\nTotal 100'}]
+
+
+def test_semantic_similarity_returns_e5_scores():
+    model = Mock()
+    model.encode.return_value = __import__('numpy').array([
+        [1.0, 0.0],
+        [0.8, 0.6],
+        [0.0, 1.0],
+    ])
+
+    with patch('services.ocr_service._load_e5_model', return_value=model):
+        result = score_semantic_similarity('ABC Technologies Pvt Ltd', [
+            'NEFT PAYMENT ABC TECHNOLOGIES INV1001',
+            'random narration',
+        ])
+
+    assert result['provider'] == 'e5-small-v2'
+    assert result['scores'][0]['semantic_score'] > result['scores'][1]['semantic_score']
+    assert result['scores'][0]['passage'] == 'NEFT PAYMENT ABC TECHNOLOGIES INV1001'

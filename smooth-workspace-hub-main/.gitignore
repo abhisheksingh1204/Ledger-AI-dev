@@ -29,6 +29,13 @@ dist-ssr
 ocr-service/.venv/
 ocr-service/__pycache__/
 ocr-service/*.pyc
+ocr-service/.env....
+ocr-service/venv/
+
+# Python environments and caches
+venv/
+.venv/
+__pycache__/
 
 # Editor directories and files
 .vscode/*

@@ -98,11 +98,11 @@ async function callOcrService(document) {
 
     return {
       ...payload.data,
-      ocr_provider: 'ocr.space',
+      ocr_provider: payload.data?.ocr?.provider || payload.data?.ocr_provider || 'paddleocr',
       ocr: {
         ...(payload.data.ocr || {}),
-        provider: 'ocr.space',
-        fallback_used: false
+        provider: payload.data?.ocr?.provider || payload.data?.ocr_provider || 'paddleocr',
+        fallback_used: Boolean(payload.data?.ocr?.fallback_used)
       }
     };
   } catch (error) {
@@ -128,11 +128,14 @@ async function callOcrService(document) {
 
 function isFallbackEligible(error) {
   return [
+    'OCR_ALL_PROVIDERS_FAILED',
     'OCR_PROVIDER_ERROR',
     'OCR_MALFORMED_RESPONSE',
     'OCR_EMPTY_RESULT',
     'OCR_API_TIMEOUT',
     'OCR_SERVICE_TIMEOUT',
+    'PADDLEOCR_PROVIDER_ERROR',
+    'PADDLEOCR_EMPTY_RESULT',
     'OCR_RATE_LIMITED'
   ].includes(error?.code);
 }
@@ -201,12 +204,22 @@ async function parseGeminiText(document, ocrResult) {
 }
 
 async function callGeminiFallback(document, primaryError) {
+  const primaryProviders = Array.isArray(primaryError?.details?.providers)
+    ? primaryError.details.providers.map((item) => item.provider).filter(Boolean)
+    : [];
+
   await insertAuditLog({
     action: 'OCR_FALLBACK_STARTED',
     tableName: 'documents',
     recordId: document.id,
     userId: document.user_id,
-    newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', fallbackProvider: 'gemini', failureCode: safeProviderReason(primaryError) }
+    newValue: {
+      documentId: document.document_id,
+      primaryProvider: primaryProviders[0] || 'paddleocr',
+      primaryProviders,
+      fallbackProvider: 'gemini',
+      failureCode: safeProviderReason(primaryError)
+    }
   });
 
   try {
@@ -223,7 +236,12 @@ async function callGeminiFallback(document, primaryError) {
       tableName: 'documents',
       recordId: document.id,
       userId: document.user_id,
-      newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', fallbackProvider: 'gemini' }
+      newValue: {
+        documentId: document.document_id,
+        primaryProvider: primaryProviders[0] || 'paddleocr',
+        primaryProviders,
+        fallbackProvider: 'gemini'
+      }
     });
     return extraction;
   } catch (fallbackError) {
@@ -232,14 +250,27 @@ async function callGeminiFallback(document, primaryError) {
       tableName: 'documents',
       recordId: document.id,
       userId: document.user_id,
-      newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', fallbackProvider: 'gemini', failureCode: safeProviderReason(fallbackError) }
+      newValue: {
+        documentId: document.document_id,
+        primaryProvider: primaryProviders[0] || 'paddleocr',
+        primaryProviders,
+        fallbackProvider: 'gemini',
+        failureCode: safeProviderReason(fallbackError)
+      }
     });
     if (fallbackError.code === 'CLOUDINARY_DOWNLOAD_FAILED') throw fallbackError;
     throw new AppError(
       'OCR_ALL_PROVIDERS_FAILED',
       'All OCR providers failed to extract this document.',
       502,
-      { providers: [{ provider: 'ocr.space', reason: safeProviderReason(primaryError) }, { provider: 'gemini', reason: safeProviderReason(fallbackError) }] }
+      {
+        providers: [
+          ...(Array.isArray(primaryError?.details?.providers)
+            ? primaryError.details.providers
+            : [{ provider: 'paddleocr', reason: safeProviderReason(primaryError) }]),
+          { provider: 'gemini', reason: safeProviderReason(fallbackError) }
+        ]
+      }
     );
   }
 }
@@ -249,13 +280,17 @@ async function callOcrWithFallback(document) {
     return await callOcrService(document);
   } catch (primaryError) {
     if (!isFallbackEligible(primaryError)) throw primaryError;
-    console.warn('OCR.Space failed for documentId=%s reason=%s fallback=gemini', document.document_id, safeProviderReason(primaryError));
+    console.warn('OCR pipeline failed for documentId=%s reason=%s fallback=gemini', document.document_id, safeProviderReason(primaryError));
     await insertAuditLog({
       action: 'OCR_PRIMARY_FAILED',
       tableName: 'documents',
       recordId: document.id,
       userId: document.user_id,
-      newValue: { documentId: document.document_id, primaryProvider: 'ocr.space', failureCode: safeProviderReason(primaryError) }
+      newValue: {
+        documentId: document.document_id,
+        primaryProvider: 'paddleocr',
+        failureCode: safeProviderReason(primaryError)
+      }
     });
     return callGeminiFallback(document, primaryError);
   }

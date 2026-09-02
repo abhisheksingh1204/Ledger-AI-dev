@@ -62,7 +62,7 @@ test('phase 5 synthetic end-to-end flow stays deterministic', async () => {
       invoice_id: 'INV-1001',
       customer_name: 'ABC Technologies',
       seller_name: 'ABC Technologies',
-      amount: '50000.00',
+      amount: '59000.00',
       subtotal: '50000.00',
       tax_amount: '9000.00',
       invoice_date: '2026-08-01',
@@ -72,7 +72,7 @@ test('phase 5 synthetic end-to-end flow stays deterministic', async () => {
   ];
 
   const transactions = [
-    { id: 101, transaction_id: 'BTX-101', amount: '50000.00', transaction_date: '2026-08-01' }
+    { id: 101, transaction_id: 'BTX-101', amount: '59000.00', transaction_date: '2026-08-01' }
   ];
 
   const matches = [

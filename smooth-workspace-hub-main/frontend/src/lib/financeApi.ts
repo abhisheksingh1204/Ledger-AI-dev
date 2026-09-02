@@ -45,7 +45,14 @@ export type ReconciliationResult = {
   transactionId?: string;
   matchType: string;
   confidence?: number;
-  scores?: { amount: number; reference: number; name: number; date: number; confidence: number };
+  scores?: {
+    amount: number;
+    reference: number;
+    name: number;
+    semantic: number;
+    date: number;
+    confidence: number;
+  };
   amountDifference?: string;
   warnings?: Array<{ type: string; severity?: string; [key: string]: unknown }>;
 };

@@ -7,7 +7,8 @@ const ALLOWED_MIME_TYPES = new Set([
   'image/jpeg'
 ]);
 
-const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_DOCUMENT_SIZE_MB = Number(process.env.MAX_DOCUMENT_SIZE_MB || 10);
+const MAX_FILE_SIZE_BYTES = Math.max(1, MAX_DOCUMENT_SIZE_MB) * 1024 * 1024;
 
 const upload = multer({
   storage: multer.memoryStorage(),

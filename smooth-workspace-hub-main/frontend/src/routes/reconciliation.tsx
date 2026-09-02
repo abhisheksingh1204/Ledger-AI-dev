@@ -184,7 +184,7 @@ function ReconciliationPage() {
                         </td>
                         <td className="py-4 text-xs text-on-surface-variant">
                           {result.scores
-                            ? `Amount ${result.scores.amount} | Ref ${result.scores.reference} | Name ${result.scores.name} | Date ${result.scores.date}`
+                            ? `Amount ${result.scores.amount} | Ref ${result.scores.reference} | Name ${result.scores.name} | Semantic ${result.scores.semantic} | Date ${result.scores.date}`
                             : "-"}
                         </td>
                         <td className="py-4">

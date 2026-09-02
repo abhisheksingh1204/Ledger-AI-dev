@@ -6,14 +6,19 @@ const CONFIG = {
   beforeDays: Number(process.env.RECON_DATE_BEFORE_DAYS || 7),
   afterDays: Number(process.env.RECON_DATE_AFTER_DAYS || 30),
   auto: Number(process.env.RECON_AUTO_MATCH_THRESHOLD || 90),
-  review: Number(process.env.RECON_REVIEW_THRESHOLD || 70)
+  review: Number(process.env.RECON_REVIEW_THRESHOLD || 70),
+  semanticServiceUrl: process.env.SEMANTIC_SERVICE_URL || process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8001',
+  semanticServiceToken: process.env.OCR_SERVICE_INTERNAL_TOKEN || '',
+  semanticTimeoutMs: Number(process.env.SEMANTIC_TIMEOUT_MS || process.env.OCR_SERVICE_TIMEOUT_MS || 120000)
 };
 const WEIGHTS = {
-  amount: Number(process.env.RECON_WEIGHT_AMOUNT || 40) / 100,
-  reference: Number(process.env.RECON_WEIGHT_REFERENCE || 30) / 100,
-  name: Number(process.env.RECON_WEIGHT_NAME || 20) / 100,
-  date: Number(process.env.RECON_WEIGHT_DATE || 10) / 100
+  amount: Number(process.env.RECON_WEIGHT_AMOUNT || 35),
+  reference: Number(process.env.RECON_WEIGHT_REFERENCE || 25),
+  name: Number(process.env.RECON_WEIGHT_NAME || 15),
+  semantic: Number(process.env.RECON_WEIGHT_SEMANTIC || 15),
+  date: Number(process.env.RECON_WEIGHT_DATE || 10)
 };
+const WEIGHT_TOTAL = Object.values(WEIGHTS).reduce((sum, value) => sum + value, 0) || 1;
 function normalize(v) { return String(v || '').toLowerCase().replace(/\b(private|pvt|limited|ltd|inc|llc)\b/g, '').replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim(); }
 function compact(v) { return normalize(v).replace(/ /g, ''); }
 function levenshtein(a, b) { const m = Array.from({ length: a.length + 1 }, (_, i) => [i]); for (let j = 1; j <= b.length; j++) m[0][j] = j; for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) m[i][j] = Math.min(m[i - 1][j] + 1, m[i][j - 1] + 1, m[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)); return m[a.length][b.length]; }
@@ -30,15 +35,96 @@ function jaroWinkler(a, b) {
 function amountScore(a, b) { const x = new Decimal(a || 0); const y = new Decimal(b || 0); if (!x.isFinite() || x.isZero()) return 0; return x.eq(y) ? 100 : Math.max(0, Math.round((100 - x.minus(y).abs().div(x).mul(100).toNumber()) * 100) / 100); }
 function dateScore(days) { return days <= 3 ? 100 : days <= 7 ? 90 : days <= 15 ? 75 : days <= 30 ? 50 : Math.max(0, 50 - days + 30); }
 function daysBetween(a, b) { const x = new Date(a); const y = new Date(b); return Number.isNaN(x.getTime()) || Number.isNaN(y.getTime()) ? 999 : Math.abs(Math.round((y - x) / 86400000)); }
+function weight(value) { return value / WEIGHT_TOTAL; }
 
-function score(invoice, transaction) {
+function semanticClean(value) {
+  return String(value || '')
+    .replace(/\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{1,2}\s+[a-z]{3,9}\s+\d{2,4}|[a-z]{3,9}\s+\d{1,2},?\s+\d{2,4})\b/gi, ' ')
+    .replace(/\b(?:invoice|inv|bill|utr|ref|reference|txn|transaction|payment)\s*[:#\-]?\s*[a-z0-9/\-_.]*\d[a-z0-9/\-_.]*\b/gi, ' ')
+    .replace(/\b(?:inr|usd|eur|gbp|rs\.?|₹|\$)\s*\d[\d,]*(?:\.\d{1,2})?\b/gi, ' ')
+    .replace(/\b\d[\d,]*(?:\.\d{1,2})?\b/g, ' ')
+    .replace(/[^a-zA-Z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function buildSemanticQuery(invoice = {}) {
+  return semanticClean(invoice.customer_name || invoice.seller_name || '');
+}
+
+function buildSemanticPassage(transaction = {}) {
+  return semanticClean(transaction.description || transaction.counterparty || transaction.payer_payee || '');
+}
+
+async function getSemanticScores(query, passages) {
+  const cleanedQuery = buildSemanticQuery({ customer_name: query });
+  const cleanedPassages = passages.map((passage) => buildSemanticPassage({ description: passage }));
+  if (!cleanedQuery || cleanedPassages.every((passage) => !passage)) {
+    return passages.map(() => 0);
+  }
+
+  const scoringTargets = cleanedPassages
+    .map((passage, index) => ({ passage, index }))
+    .filter((entry) => entry.passage);
+
+  if (!scoringTargets.length) {
+    return passages.map(() => 0);
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), CONFIG.semanticTimeoutMs);
+  try {
+    const response = await fetch(`${CONFIG.semanticServiceUrl}/internal/semantic-score`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(CONFIG.semanticServiceToken ? { 'X-Internal-Token': CONFIG.semanticServiceToken } : {})
+      },
+      body: JSON.stringify({ query: cleanedQuery, passages: scoringTargets.map((entry) => entry.passage) }),
+      signal: controller.signal
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload?.success || !Array.isArray(payload?.data?.scores)) {
+      throw new Error(payload?.error?.message || 'semantic service failed');
+    }
+    const scores = passages.map(() => 0);
+    scoringTargets.forEach((entry, index) => {
+      scores[entry.index] = Number(payload.data.scores[index]?.semantic_score || 0);
+    });
+    return scores;
+  } catch (error) {
+    console.warn('Semantic scoring unavailable: %s', error.message || error);
+    return passages.map(() => 0);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function score(invoice, transaction, semantic = 0) {
   const data = invoice.extracted_data?.invoice || {};
   const number = data.invoice_number || invoice.invoice_id;
   const description = `${transaction.description || ''} ${transaction.reference || ''}`;
-  const referenceExact = compact(description).includes(compact(number)) || compact(description).includes(compact(data.payment_reference));
+  const paymentReference = compact(data.payment_reference);
+  const referenceExact =
+    compact(description).includes(compact(number)) ||
+    (paymentReference ? compact(description).includes(paymentReference) : false);
   const days = daysBetween(invoice.invoice_date, transaction.transaction_date);
-  const scores = { amount: amountScore(invoice.amount, transaction.amount), reference: referenceExact ? 100 : similarity(number, description), name: jaroWinkler(data.customer_name || invoice.customer_name, description), date: dateScore(days) };
-  scores.confidence = Math.round((scores.amount * WEIGHTS.amount + scores.reference * WEIGHTS.reference + scores.name * WEIGHTS.name + scores.date * WEIGHTS.date) * 100) / 100;
+  const scores = {
+    amount: amountScore(invoice.amount, transaction.amount),
+    reference: referenceExact ? 100 : similarity(number, description),
+    name: jaroWinkler(data.customer_name || invoice.customer_name, description),
+    semantic: Math.max(0, Math.min(100, Number(semantic) || 0)),
+    date: dateScore(days)
+  };
+  scores.confidence = Math.round(
+    (
+      scores.amount * weight(WEIGHTS.amount) +
+      scores.reference * weight(WEIGHTS.reference) +
+      scores.name * weight(WEIGHTS.name) +
+      scores.semantic * weight(WEIGHTS.semantic) +
+      scores.date * weight(WEIGHTS.date)
+    ) * 100
+  ) / 100;
   const difference = new Decimal(invoice.amount || 0).minus(transaction.amount || 0).abs();
   const warnings = [];
   if (!difference.isZero()) warnings.push({ type: difference.lt(invoice.amount || 0) ? 'PARTIAL_PAYMENT' : 'AMOUNT_MISMATCH', severity: 'HIGH', difference: difference.toFixed(2) });
@@ -57,9 +143,18 @@ function findPaymentCombination(invoice, candidates, limit = 3) {
         amount: 100,
         reference: Math.max(...parts.map((p) => p.scores.reference)),
         name: Math.max(...parts.map((p) => p.scores.name)),
+        semantic: Math.max(...parts.map((p) => p.scores.semantic || 0)),
         date: Math.min(...parts.map((p) => p.scores.date))
       } };
-      found.scores.confidence = Math.round((found.scores.amount * WEIGHTS.amount + found.scores.reference * WEIGHTS.reference + found.scores.name * WEIGHTS.name + found.scores.date * WEIGHTS.date) * 100) / 100;
+      found.scores.confidence = Math.round(
+        (
+          found.scores.amount * weight(WEIGHTS.amount) +
+          found.scores.reference * weight(WEIGHTS.reference) +
+          found.scores.name * weight(WEIGHTS.name) +
+          found.scores.semantic * weight(WEIGHTS.semantic) +
+          found.scores.date * weight(WEIGHTS.date)
+        ) * 100
+      ) / 100;
       return true;
     }
     if (chosen.length === limit || found) return Boolean(found);
@@ -94,10 +189,15 @@ async function runReconciliation(sessionId, userId) {
         const amount = new Decimal(invoice.amount || 0).minus(t.amount || 0).abs();
         return dateAllowed && (amount.lte(CONFIG.tolerance) || new Decimal(t.amount || 0).lt(invoice.amount || 0));
       });
-      const ranked = candidates.map((t) => ({ t, ...score(invoice, t) })).sort((a, b) => b.scores.confidence - a.scores.confidence);
+      const semanticQuery = buildSemanticQuery(invoice);
+      const semanticPassages = candidates.map((t) => buildSemanticPassage(t));
+      const semanticScores = await getSemanticScores(semanticQuery, semanticPassages);
+      const ranked = candidates
+        .map((t, index) => ({ t, ...score(invoice, t, semanticScores[index]) }))
+        .sort((a, b) => b.scores.confidence - a.scores.confidence);
       if (!ranked.length) { const warning = { type: 'NO_TRANSACTION_FOUND', severity: 'HIGH' }; await trx('exceptions').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, exception_type: warning.type, severity: warning.severity, description: 'No candidate bank transaction found.' }); results.push({ invoiceId: invoice.invoice_id, matchType: 'UNMATCHED', warnings: [warning] }); continue; }
       let best = ranked[0];
-      const grouped = best.scores.amount < 100 ? findPaymentCombination(invoice, candidates.map((t) => ({ transaction: t, scored: score(invoice, t) }))) : null;
+      const grouped = best.scores.amount < 100 ? findPaymentCombination(invoice, candidates.map((t, index) => ({ transaction: t, scored: score(invoice, t, semanticScores[index]) }))) : null;
       if (grouped) {
         const total = grouped.transactions.reduce((sum, t) => sum.plus(t.amount || 0), new Decimal(0));
         best = { t: grouped.transactions[0], transactions: grouped.transactions, scores: grouped.scores, difference: total.minus(invoice.amount || 0).abs(), referenceExact: grouped.scores.reference === 100, days: Math.max(...grouped.transactions.map((t) => daysBetween(invoice.invoice_date, t.transaction_date))), warnings: [] };
@@ -109,7 +209,7 @@ async function runReconciliation(sessionId, userId) {
       const matchType = grouped ? 'MULTI_TRANSACTION_MATCH' : partial ? 'PARTIAL_PAYMENT' : auto || best.scores.confidence >= CONFIG.auto ? 'AUTO_MATCH' : best.scores.confidence >= CONFIG.review ? 'MANUAL_REVIEW' : 'UNMATCHED';
       if (matchType !== 'AUTO_MATCH') best.warnings.push({ type: 'LOW_CONFIDENCE_MATCH', severity: 'MEDIUM' });
       const transactionIds = (best.transactions || [best.t]).map((t) => t.id);
-      await trx('reconciliation_matches').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, transaction_id: best.t.id, amount_score: best.scores.amount, reference_score: best.scores.reference, name_score: best.scores.name, date_score: best.scores.date, confidence_score: best.scores.confidence, amount_difference: best.difference.toFixed(2), match_type: matchType, status: matchType === 'AUTO_MATCH' || matchType === 'MULTI_TRANSACTION_MATCH' ? 'MATCHED' : 'PENDING_REVIEW', reason: { scores: best.scores, warnings: best.warnings, days: best.days, transactionIds } });
+      await trx('reconciliation_matches').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, transaction_id: best.t.id, amount_score: best.scores.amount, reference_score: best.scores.reference, name_score: best.scores.name, semantic_score: best.scores.semantic, date_score: best.scores.date, confidence_score: best.scores.confidence, amount_difference: best.difference.toFixed(2), match_type: matchType, status: matchType === 'AUTO_MATCH' || matchType === 'MULTI_TRANSACTION_MATCH' ? 'MATCHED' : 'PENDING_REVIEW', reason: { scores: best.scores, warnings: best.warnings, days: best.days, transactionIds } });
        transactionIds.forEach((id) => used.add(id));
       for (const warning of best.warnings) {
         for (const transactionId of transactionIds) await trx('exceptions').insert({ run_id: run.id, session_id: session.id, invoice_id: invoice.id, transaction_id: transactionId, exception_type: warning.type, severity: warning.severity || 'MEDIUM', description: JSON.stringify({ ...warning, outstanding: partial ? new Decimal(invoice.amount || 0).minus(best.t.amount || 0).toFixed(2) : undefined }) });
@@ -130,4 +230,17 @@ async function runReconciliation(sessionId, userId) {
   });
   return { totalInvoices: invoices.length, autoMatched: results.filter((r) => r.matchType === 'AUTO_MATCH').length, manualReview: results.filter((r) => r.matchType === 'MANUAL_REVIEW').length, unmatched: results.filter((r) => r.matchType === 'UNMATCHED').length, results };
 }
-module.exports = { runReconciliation, normalize, compact, similarity, jaroWinkler, amountScore, dateScore, findPaymentCombination };
+module.exports = {
+  runReconciliation,
+  normalize,
+  compact,
+  similarity,
+  jaroWinkler,
+  amountScore,
+  dateScore,
+  findPaymentCombination,
+  score,
+  buildSemanticQuery,
+  buildSemanticPassage,
+  getSemanticScores
+};

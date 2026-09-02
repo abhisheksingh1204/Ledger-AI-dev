@@ -1,27 +1,64 @@
 from __future__ import annotations
 
 import os
+from services.document_repository import get_connection
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from services.document_repository import get_document_by_id
-from services.ocr_service import OcrServiceError, _build_extracted_payload, process_document
-from schemas import ParseDocumentTextRequest, ProcessDocumentRequest
+from services.ocr_service import (
+    OcrServiceError,
+    _build_extracted_payload,
+    process_document,
+    score_semantic_similarity,
+    warm_service_models,
+)
+from schemas import ParseDocumentTextRequest, ProcessDocumentRequest, SemanticScoreRequest
 
 app = FastAPI(title="Finance Controller OCR Service", version="1.0.0")
 
 INTERNAL_TOKEN = os.getenv("OCR_SERVICE_INTERNAL_TOKEN", "")
+ALLOW_INSECURE_INTERNAL_SERVICE = os.getenv("ALLOW_INSECURE_INTERNAL_SERVICE", "false").lower() == "true"
+
+
+@app.on_event("startup")
+def startup_event():
+    warm_service_models()
 
 
 @app.get("/health")
 def health():
-    return {"success": True, "message": "OCR service running"}
+    database = "ready"
+    try:
+        with get_connection() as connection:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+    except Exception:
+        database = "unavailable"
+
+    from services.ocr_service import _MODEL_READINESS
+
+    paddleocr = "ready" if _MODEL_READINESS["paddleocr"] else "unavailable"
+    e5 = "ready" if _MODEL_READINESS["e5"] else "unavailable"
+    status = "ok" if database == "ready" and paddleocr == "ready" and e5 == "ready" else "degraded"
+    return {
+        "success": status == "ok",
+        "status": status,
+        "database": database,
+        "paddleocr": paddleocr,
+        "e5": e5,
+    }
 
 
 def _validate_internal_token(token: str | None) -> None:
-    if INTERNAL_TOKEN and token != INTERNAL_TOKEN:
+    if not INTERNAL_TOKEN and not ALLOW_INSECURE_INTERNAL_SERVICE:
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "INTERNAL_TOKEN_NOT_CONFIGURED", "message": "Internal service token is not configured."},
+        )
+    if not ALLOW_INSECURE_INTERNAL_SERVICE and token != INTERNAL_TOKEN:
         raise HTTPException(
             status_code=401,
             detail={"code": "UNAUTHORIZED", "message": "Invalid internal token."},
@@ -71,13 +108,36 @@ def parse_document_text_route(
         document = get_document_by_id(payload.documentId)
         return {
             "success": True,
-            "data": _build_extracted_payload(document, payload.rawText, payload.pages),
+            "data": _build_extracted_payload(
+                document,
+                payload.rawText,
+                payload.pages,
+                provider="gemini",
+                fallback_used=True,
+            ),
         }
     except LookupError as exc:
         raise HTTPException(
             status_code=404,
             detail={"code": "DOCUMENT_NOT_FOUND", "message": str(exc)},
         ) from exc
+
+
+@app.post("/internal/semantic-score")
+def semantic_score_route(
+    payload: SemanticScoreRequest,
+    x_internal_token: str | None = Header(default=None, alias="X-Internal-Token"),
+):
+    _validate_internal_token(x_internal_token)
+
+    try:
+        return {
+            "success": True,
+            "data": score_semantic_similarity(payload.query, payload.passages),
+        }
+    except OcrServiceError as exc:
+        detail = {"code": exc.code, "message": exc.message}
+        raise HTTPException(status_code=exc.status_code, detail=detail) from exc
 
 
 @app.exception_handler(HTTPException)

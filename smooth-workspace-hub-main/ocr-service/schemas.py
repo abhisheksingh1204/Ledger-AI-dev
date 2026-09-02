@@ -15,6 +15,11 @@ class ParseDocumentTextRequest(BaseModel):
     pages: list[dict] = Field(default_factory=list)
 
 
+class SemanticScoreRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    passages: list[str] = Field(..., min_length=1)
+
+
 class ErrorResponse(BaseModel):
     success: bool = False
     error: dict

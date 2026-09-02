@@ -135,6 +135,7 @@ async function getInvoiceContext(invoiceId, userId) {
         amount_score: matches[0].amount_score,
         reference_score: matches[0].reference_score,
         name_score: matches[0].name_score,
+        semantic_score: matches[0].semantic_score,
         date_score: matches[0].date_score,
         reason: matches[0].reason
       }
@@ -157,6 +158,7 @@ function safeContext(context) {
       amount_score: match.amount_score,
       reference_score: match.reference_score,
       name_score: match.name_score,
+      semantic_score: match.semantic_score,
       date_score: match.date_score,
       amount_difference: match.amount_difference,
       reason: match.reason
