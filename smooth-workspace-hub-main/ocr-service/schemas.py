@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 class ProcessDocumentRequest(BaseModel):
     documentId: str = Field(..., min_length=1)
+    signedDownloadUrl: str = Field(..., min_length=1)
 
 
 class ParseDocumentTextRequest(BaseModel):

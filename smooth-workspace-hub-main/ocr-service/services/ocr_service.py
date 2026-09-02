@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from io import BytesIO
 from dataclasses import dataclass
 from typing import Any
@@ -22,6 +23,11 @@ ALLOWED_MIME_TYPES = {"application/pdf", "image/png", "image/jpeg"}
 OCR_PROVIDER = "ocr.space"
 DEFAULT_OCR_URL = "https://api.ocr.space/parse/image"
 E5_MODEL_NAME = os.getenv("E5_MODEL_NAME", "intfloat/e5-small-v2")
+PADDLE_DET_MODEL_NAME = os.getenv("PADDLE_DET_MODEL_NAME", "PP-OCRv5_mobile_det")
+PADDLE_REC_MODEL_NAME = os.getenv("PADDLE_REC_MODEL_NAME", "en_PP-OCRv5_mobile_rec")
+PDF_RENDER_DPI = int(os.getenv("PDF_RENDER_DPI", "150"))
+PADDLE_CPU_THREADS = int(os.getenv("PADDLE_CPU_THREADS", "4"))
+OCR_MAX_IMAGE_DIMENSION = int(os.getenv("OCR_MAX_IMAGE_DIMENSION", "2500"))
 LOGGER = logging.getLogger(__name__)
 _PADDLE_OCR_MODEL = None
 _E5_MODEL = None
@@ -43,9 +49,12 @@ class OcrServiceError(Exception):
 
 def warm_service_models() -> None:
     """Load OCR and embedding models once during service startup."""
+    started_at = time.monotonic()
     try:
         _get_paddle_ocr()
+        _warm_paddle_inference()
         _MODEL_READINESS["paddleocr"] = True
+        LOGGER.info("PaddleOCR ready model_det=%s model_rec=%s init_ms=%s", PADDLE_DET_MODEL_NAME, PADDLE_REC_MODEL_NAME, round((time.monotonic() - started_at) * 1000))
     except Exception:
         LOGGER.exception("Failed to warm PaddleOCR model.")
 
@@ -64,6 +73,15 @@ def _get_env_int(name: str, default: int) -> int:
         return int(value)
     except ValueError:
         return default
+
+
+def _warm_paddle_inference() -> None:
+    import numpy as np
+
+    model = _PADDLE_OCR_MODEL
+    if model is None:
+        raise OcrServiceError("PADDLEOCR_UNAVAILABLE", "PaddleOCR model is not initialized.", 503)
+    model.predict(np.full((96, 96, 3), 255, dtype=np.uint8))
 
 
 def _get_max_file_size_bytes() -> int:
@@ -92,17 +110,23 @@ def _get_paddle_ocr():
             status_code=503,
         ) from exc
 
+    try:
+        import paddle
+        paddle.set_device("cpu")
+        paddle.set_num_threads(max(1, PADDLE_CPU_THREADS))
+    except Exception:
+        pass
+
     init_attempts = [
         {
-            "lang": "en",
             "device": "cpu",
             "enable_mkldnn": False,
             "use_doc_orientation_classify": False,
             "use_doc_unwarping": False,
             "use_textline_orientation": False,
-        },
-        {"lang": "en", "device": "cpu", "enable_mkldnn": False},
-        {"lang": "en"},
+            "text_detection_model_name": PADDLE_DET_MODEL_NAME,
+            "text_recognition_model_name": PADDLE_REC_MODEL_NAME,
+        }
     ]
 
     last_error: Exception | None = None
@@ -197,7 +221,8 @@ def _render_document_pages(file_bytes: bytes, mime_type: str) -> list[tuple[int,
         document = fitz.open(stream=file_bytes, filetype="pdf")
         try:
             for index, page in enumerate(document, start=1):
-                pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+                scale = max(PDF_RENDER_DPI, 72) / 72
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(scale, scale), alpha=False)
                 pages.append((index, pixmap.tobytes("png"), "image/png"))
         finally:
             document.close()
@@ -221,7 +246,15 @@ def _image_bytes_to_array(image_bytes: bytes):
         ) from exc
 
     with Image.open(BytesIO(image_bytes)) as image:
-        return np.array(image.convert("RGB"))
+        image = image.convert("RGB")
+        max_dimension = max(image.size)
+        if max_dimension > OCR_MAX_IMAGE_DIMENSION:
+            scale = OCR_MAX_IMAGE_DIMENSION / max_dimension
+            image = image.resize(
+                (round(image.width * scale), round(image.height * scale)),
+                Image.Resampling.LANCZOS,
+            )
+        return np.array(image)
 
 
 def _extract_paddle_lines(result: Any) -> list[str]:
@@ -293,7 +326,11 @@ def _extract_paddle_lines(result: Any) -> list[str]:
 
 def _call_paddle_ocr(file_bytes: bytes, filename: str, mime_type: str, *, document_id: str | None = None) -> tuple[str, list[dict[str, Any]]]:
     model = _get_paddle_ocr()
+    started_at = time.monotonic()
+    render_started_at = time.monotonic()
     pages = _render_document_pages(file_bytes, mime_type)
+    render_ms = round((time.monotonic() - render_started_at) * 1000)
+    inference_started_at = time.monotonic()
     texts: list[str] = []
     normalized_pages: list[dict[str, Any]] = []
 
@@ -324,6 +361,7 @@ def _call_paddle_ocr(file_bytes: bytes, filename: str, mime_type: str, *, docume
             texts.append(page_text)
 
     raw_text = "\n\n".join(texts).strip()
+    inference_ms = round((time.monotonic() - inference_started_at) * 1000)
     if not raw_text:
         raise OcrServiceError(
             code="PADDLEOCR_EMPTY_RESULT",
@@ -332,15 +370,24 @@ def _call_paddle_ocr(file_bytes: bytes, filename: str, mime_type: str, *, docume
             provider="paddleocr",
         )
 
+    LOGGER.info(
+        "PaddleOCR timing document=%s pages=%s processed_pages=%s pdf_render_ms=%s paddle_inference_ms=%s total_ms=%s",
+        document_id or "unknown",
+        len(pages),
+        len(normalized_pages),
+        render_ms,
+        inference_ms,
+        round((time.monotonic() - started_at) * 1000),
+    )
     return raw_text, normalized_pages
 
 
-def _download_cloudinary_document(document: dict[str, Any]) -> bytes:
-    url = document.get("cloudinary_secure_url") or document.get("cloudinary_url")
+def _download_cloudinary_document(document: dict[str, Any], signed_url: str | None = None) -> bytes:
+    url = signed_url
     if not url:
         raise OcrServiceError(
             code="CLOUDINARY_DOWNLOAD_FAILED",
-            message="Cloudinary URL is missing for this document.",
+            message="Signed Cloudinary download URL is missing for this document.",
             status_code=502,
         )
 
@@ -353,15 +400,52 @@ def _download_cloudinary_document(document: dict[str, Any]) -> bytes:
             status_code=502,
         ) from exc
 
+    if response.status_code in {401, 403}:
+        LOGGER.warning("Cloudinary download failed documentId=%s status=%s", document.get("document_id"), response.status_code)
+        raise OcrServiceError(
+            code="CLOUDINARY_AUTH_ERROR",
+            message="Unable to access private document.",
+            status_code=response.status_code,
+        )
+    if response.status_code == 404:
+        LOGGER.warning("Cloudinary download failed documentId=%s status=404", document.get("document_id"))
+        raise OcrServiceError(
+            code="CLOUDINARY_ASSET_NOT_FOUND",
+            message="The stored Cloudinary asset could not be found.",
+            status_code=404,
+        )
     if response.status_code != 200:
+        LOGGER.warning("Cloudinary download failed documentId=%s status=%s", document.get("document_id"), response.status_code)
         raise OcrServiceError(
             code="CLOUDINARY_DOWNLOAD_FAILED",
             message=f"Cloudinary download failed with HTTP {response.status_code}.",
             status_code=502,
         )
 
-    file_bytes = response.content
+    content_type = (response.headers.get("content-type") or "").split(";", 1)[0].lower()
+    expected_mime_type = (document.get("mime_type") or "").lower()
+    if expected_mime_type and content_type and content_type != expected_mime_type:
+        LOGGER.warning(
+            "Cloudinary download returned unexpected type documentId=%s content_type=%s",
+            document.get("document_id"),
+            content_type,
+        )
+        raise OcrServiceError(
+            code="CLOUDINARY_DOWNLOAD_FAILED",
+            message="Cloudinary returned an unexpected document type.",
+            status_code=502,
+        )
+
+    content_length = int(response.headers.get("content-length") or 0)
     max_bytes = _get_max_file_size_bytes()
+    if content_length > max_bytes:
+        raise OcrServiceError(
+            code="OCR_FILE_TOO_LARGE",
+            message=f"OCR file size exceeds the configured limit of {max_bytes // (1024 * 1024)} MB.",
+            status_code=400,
+        )
+
+    file_bytes = response.content
     if len(file_bytes) > max_bytes:
         raise OcrServiceError(
             code="OCR_FILE_TOO_LARGE",
@@ -369,6 +453,7 @@ def _download_cloudinary_document(document: dict[str, Any]) -> bytes:
             status_code=400,
         )
 
+    LOGGER.info("Cloudinary download completed documentId=%s status=200", document.get("document_id"))
     return file_bytes
 
 
@@ -497,6 +582,8 @@ def _call_ocr_space(file_bytes: bytes, filename: str, mime_type: str, *, engine:
         "file": (filename, file_bytes, mime_type),
     }
 
+    started_at = time.monotonic()
+    LOGGER.info("OCR.Space started document=%s", document_id or "unknown")
     try:
         response = requests.post(
             api_url,
@@ -506,29 +593,34 @@ def _call_ocr_space(file_bytes: bytes, filename: str, mime_type: str, *, engine:
             timeout=_get_timeout_seconds(),
         )
     except requests.Timeout as exc:
+        LOGGER.warning("OCR.Space failed document=%s reason=OCR_SPACE_TIMEOUT duration_ms=%s", document_id or "unknown", round((time.monotonic() - started_at) * 1000))
         raise OcrServiceError("OCR_API_TIMEOUT", "OCR.Space request timed out.", 504) from exc
     except requests.RequestException as exc:
+        LOGGER.warning("OCR.Space failed document=%s reason=OCR_SPACE_NETWORK_ERROR duration_ms=%s", document_id or "unknown", round((time.monotonic() - started_at) * 1000))
         raise OcrServiceError("OCR_API_FAILED", f"OCR.Space request failed: {exc}", 502) from exc
 
     raw_body = response.text or ""
     try:
         response_json = response.json()
     except ValueError as exc:
+        LOGGER.warning("OCR.Space failed document=%s reason=OCR_SPACE_MALFORMED_RESPONSE duration_ms=%s", document_id or "unknown", round((time.monotonic() - started_at) * 1000))
         raise OcrServiceError("OCR_MALFORMED_RESPONSE", "OCR.Space returned invalid JSON.", 502) from exc
 
     if response.status_code != 200:
         error = _classify_ocr_space_error(response.status_code, response_json, raw_body, engine=engine)
-        LOGGER.warning("OCR.Space failed documentId=%s engine=%s exitCode=%s errorMessage=%s errorDetails=%s", document_id, engine, error.ocr_exit_code, error.message, error.details)
+        LOGGER.warning("OCR.Space failed document=%s reason=%s status=%s duration_ms=%s", document_id or "unknown", error.code, response.status_code, round((time.monotonic() - started_at) * 1000))
         raise error
 
     if response_json.get("IsErroredOnProcessing"):
         error = _classify_ocr_space_error(response.status_code, response_json, raw_body, engine=engine)
-        LOGGER.warning("OCR.Space failed documentId=%s engine=%s exitCode=%s errorMessage=%s errorDetails=%s", document_id, engine, error.ocr_exit_code, error.message, error.details)
+        LOGGER.warning("OCR.Space failed document=%s reason=%s status=%s duration_ms=%s", document_id or "unknown", error.code, response.status_code, round((time.monotonic() - started_at) * 1000))
         if engine == 2 and "engine 2" in error.message.lower() and "engine 1" in error.message.lower():
             return _call_ocr_space(file_bytes, filename, mime_type, engine=1, document_id=document_id)
         raise error
 
-    return _parse_ocr_space_response(response_json)
+    result = _parse_ocr_space_response(response_json)
+    LOGGER.info("OCR.Space completed document=%s status=%s duration_ms=%s", document_id or "unknown", response.status_code, round((time.monotonic() - started_at) * 1000))
+    return result
 
 
 def _build_extracted_payload(
@@ -615,11 +707,12 @@ def score_semantic_similarity(query: str, passages: list[str]) -> dict[str, Any]
     }
 
 
-def process_document(document_id: str) -> dict[str, Any]:
+def process_document(document_id: str, signed_download_url: str) -> dict[str, Any]:
+    started_at = time.monotonic()
     document = get_document_by_id(document_id)
     _validate_internal_document(document)
 
-    file_bytes = _download_cloudinary_document(document)
+    file_bytes = _download_cloudinary_document(document, signed_download_url)
     filename = document.get("original_filename") or f"{document_id}.bin"
     mime_type = document.get("mime_type") or "application/octet-stream"
 
@@ -681,10 +774,13 @@ def process_document(document_id: str) -> dict[str, Any]:
                 },
             ) from fallback_error
 
-    return _build_extracted_payload(
+    payload = _build_extracted_payload(
         document,
         raw_text,
         pages,
         provider=provider,
         fallback_used=fallback_used,
     )
+    payload["ocr"]["processing_time_ms"] = round((time.monotonic() - started_at) * 1000)
+    payload["ocr"]["pages_processed"] = len(pages or [])
+    return payload

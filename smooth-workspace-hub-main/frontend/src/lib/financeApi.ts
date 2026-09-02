@@ -1,4 +1,4 @@
-const API_BASE_URL = (import.meta.env["VITE_BACKEND_URL"] || "http://localhost:5000").replace(
+const API_BASE_URL = (import.meta.env["VITE_BACKEND_URL"] || "http://127.0.0.1:5000").replace(
   /\/$/,
   "",
 );
@@ -7,7 +7,7 @@ const USER_ID = import.meta.env["VITE_USER_ID"] || "demo-user";
 type ApiEnvelope<T> = {
   success?: boolean;
   data?: T;
-  error?: { message?: string; code?: string };
+  error?: { message?: string; code?: string; details?: unknown };
   [key: string]: unknown;
 };
 
@@ -17,16 +17,30 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   if (init.body && !(init.body instanceof FormData))
     headers.set("content-type", "application/json");
 
+  const url = `${API_BASE_URL}${path}`;
   let response: Response;
   try {
-    response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
-  } catch {
-    throw new Error("Finance Controller API is unavailable. Start the backend and try again.");
+    response = await fetch(url, { ...init, headers });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error("Finance Controller request failed", { url, reason });
+    throw new Error(`Network request failed for ${path}: ${reason}`);
   }
 
   const payload = (await response.json().catch(() => ({}))) as ApiEnvelope<T>;
   if (!response.ok || payload.success === false) {
-    throw new Error(payload.error?.message || `Request failed with status ${response.status}.`);
+    const message = payload.error?.message || `Request failed with status ${response.status}.`;
+    const code = payload.error?.code ? ` [${payload.error.code}]` : "";
+    const details =
+      typeof payload.error?.details === "string" ? ` Details: ${payload.error.details}` : "";
+    console.error("Finance Controller API returned an error", {
+      url,
+      status: response.status,
+      code: payload.error?.code,
+      message,
+      details: payload.error?.details,
+    });
+    throw new Error(`${message}${code}${details}`);
   }
   return payload as T;
 }
@@ -105,16 +119,29 @@ export async function processSession(sessionId: string) {
 }
 
 export async function runReconciliation(sessionId: string) {
-  return request<{
+  const response = await request<{
     success: true;
     data: {
       totalInvoices: number;
-      autoMatched: number;
-      manualReview: number;
-      unmatched: number;
+      summary: {
+        autoMatched: number;
+        manualReview: number;
+        unmatched: number;
+        partialPayments: number;
+        multiTransactionMatches: number;
+        exceptions: number;
+      };
+      runId: string | null;
+      sessionId: string;
       results: ReconciliationResult[];
     };
   }>(`/api/reconciliation/${encodeURIComponent(sessionId)}/run`, { method: "POST" });
+
+  if (!response.data || !Array.isArray(response.data.results)) {
+    throw new Error("INVALID_RECONCILIATION_RESULT: Reconciliation response is malformed.");
+  }
+
+  return response;
 }
 
 export async function getReports() {

@@ -9,6 +9,7 @@ const {
   updateDocumentProcessingStatus
 } = require('./document.service');
 const { extractWithGemini } = require('./geminiOcr.service');
+const { buildSignedDocumentUrl } = require('./cloudinary.service');
 
 const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8001';
 const OCR_SERVICE_INTERNAL_TOKEN = process.env.OCR_SERVICE_INTERNAL_TOKEN || '';
@@ -48,7 +49,8 @@ function getDeterministicTransactionId({
 
 function buildOcrRequestPayload(document) {
   return {
-    documentId: document.document_id
+    documentId: document.document_id,
+    signedDownloadUrl: buildSignedDocumentUrl(document)
   };
 }
 
@@ -145,15 +147,43 @@ function safeProviderReason(error) {
 }
 
 async function downloadForGemini(document) {
-  const url = document.cloudinary_secure_url || document.cloudinary_url;
-  if (!url) throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Cloudinary URL is missing for this document.', 502);
+  const url = buildSignedDocumentUrl(document);
+  const maxBytes = Number(process.env.MAX_DOCUMENT_SIZE_MB || 10) * 1024 * 1024;
+  const expectedMimeType = (document.mime_type || '').toLowerCase();
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), OCR_SERVICE_TIMEOUT_MS);
   try {
     const response = await fetch(url, { signal: controller.signal });
-    if (!response.ok) throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Failed to download document from Cloudinary.', 502);
-    return Buffer.from(await response.arrayBuffer());
+    if (!response.ok) {
+      const code = response.status === 401 || response.status === 403
+        ? 'CLOUDINARY_AUTH_ERROR'
+        : response.status === 404
+          ? 'CLOUDINARY_ASSET_NOT_FOUND'
+          : 'CLOUDINARY_DOWNLOAD_FAILED';
+      const message = code === 'CLOUDINARY_AUTH_ERROR'
+        ? 'Unable to access private document.'
+        : code === 'CLOUDINARY_ASSET_NOT_FOUND'
+          ? 'The stored Cloudinary asset could not be found.'
+          : 'Failed to download document from Cloudinary.';
+      throw new AppError(code, message, code === 'CLOUDINARY_DOWNLOAD_FAILED' ? 502 : response.status);
+    }
+
+    const contentType = (response.headers.get('content-type') || '').split(';')[0].toLowerCase();
+    if (expectedMimeType && contentType && contentType !== expectedMimeType) {
+      throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Cloudinary returned an unexpected document type.', 502);
+    }
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > maxBytes) {
+      throw new AppError('FILE_TOO_LARGE', 'Downloaded document exceeds the configured size limit.', 413);
+    }
+
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length > maxBytes) {
+      throw new AppError('FILE_TOO_LARGE', 'Downloaded document exceeds the configured size limit.', 413);
+    }
+    console.info('Cloudinary download completed document=%s status=%s', document.document_id, response.status);
+    return bytes;
   } catch (error) {
     if (error instanceof AppError) throw error;
     if (error.name === 'AbortError') throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Cloudinary document download timed out.', 504);
@@ -227,7 +257,8 @@ async function callGeminiFallback(document, primaryError) {
     const ocrResult = await extractWithGemini({
       buffer,
       mimeType: document.mime_type || 'application/octet-stream',
-      documentType: document.document_type
+      documentType: document.document_type,
+      documentId: document.document_id
     });
     const extraction = await parseGeminiText(document, ocrResult);
     console.info('Gemini OCR succeeded for documentId=%s', document.document_id);
@@ -258,7 +289,7 @@ async function callGeminiFallback(document, primaryError) {
         failureCode: safeProviderReason(fallbackError)
       }
     });
-    if (fallbackError.code === 'CLOUDINARY_DOWNLOAD_FAILED') throw fallbackError;
+    if (fallbackError.code?.startsWith('CLOUDINARY_')) throw fallbackError;
     throw new AppError(
       'OCR_ALL_PROVIDERS_FAILED',
       'All OCR providers failed to extract this document.',

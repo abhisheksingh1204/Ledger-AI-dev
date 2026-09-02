@@ -24,13 +24,18 @@ function uploadBufferToCloudinary(buffer, options) {
 }
 
 function buildSignedDocumentUrl(document) {
-  return cloudinary.url(document.cloudinary_public_id, {
-    secure: true,
-    sign_url: true,
+  if (!document?.cloudinary_public_id) {
+    throw new AppError('CLOUDINARY_DOWNLOAD_FAILED', 'Cloudinary public ID is missing for this document.', 502);
+  }
+
+  return cloudinary.utils.private_download_url(
+    document.cloudinary_public_id,
+    document.cloudinary_format || 'pdf',
+    {
     resource_type: document.cloudinary_resource_type || 'image',
     type: 'authenticated',
-    format: document.cloudinary_format || undefined
-  });
+    }
+  );
 }
 
 async function uploadDocument({
@@ -62,6 +67,10 @@ async function uploadDocument({
 
     return result;
   } catch (error) {
+    console.error('Cloudinary upload failed:', {
+      code: error?.http_code || error?.code || 'UNKNOWN',
+      message: error?.message || 'Cloudinary upload failed.'
+    });
     const wrapped = new AppError(
       'CLOUDINARY_UPLOAD_FAILED',
       'Failed to upload document to Cloudinary.',

@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { Link, createFileRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
@@ -205,6 +205,19 @@ function QAPage() {
               <p role="alert" className="text-error mb-5">
                 {error}
               </p>
+            ) : null}
+            {invoices.length === 0 ? (
+              <div className="rounded-2xl border border-outline-variant/40 bg-surface-container-low p-6">
+                <p className="text-on-surface-variant mb-4">
+                  Upload an invoice and bank statement first to enable grounded questions.
+                </p>
+                <Link
+                  to="/reconciliation"
+                  className="inline-flex bg-secondary text-on-secondary px-5 py-3 rounded-button"
+                >
+                  Upload documents
+                </Link>
+              </div>
             ) : null}
             {invoiceId ? (
               <div className="space-y-4 text-sm">

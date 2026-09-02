@@ -73,22 +73,29 @@ function ReconciliationPage() {
     }
     setError("");
     setPhase("running");
+    let stage = "creating the reconciliation session";
     try {
       const created = await createSession();
       const sessionId = created.session.sessionId;
+      stage = "uploading the invoice and bank statement";
       await uploadDocuments(sessionId, invoice, bankStatement);
+      stage = "processing the uploaded documents";
       const processed = await processSession(sessionId);
       const failed = processed.data.results.find((item) => !item.success);
       if (failed) throw new Error(failed.error?.message || "Document processing failed.");
+      stage = "running reconciliation";
       const reconciled = await runReconciliation(sessionId);
       setResults(reconciled.data.results);
-      setSummary(reconciled.data);
+      setSummary({ totalInvoices: reconciled.data.totalInvoices, ...reconciled.data.summary });
+      stage = "loading reports";
       const reports = await getReports();
       setOverview(reports.data.overview);
       setPhase("results");
     } catch (requestError) {
       setError(
-        requestError instanceof Error ? requestError.message : "The reconciliation request failed.",
+        `Reconciliation failed while ${stage}: ${
+          requestError instanceof Error ? requestError.message : String(requestError)
+        }`,
       );
       setPhase("upload");
     }

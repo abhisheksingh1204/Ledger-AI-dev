@@ -2,13 +2,44 @@ import requests
 import pytest
 from unittest.mock import Mock, patch
 
-from services.ocr_service import OcrServiceError, _call_ocr_space, _call_paddle_ocr, score_semantic_similarity
+from services.ocr_service import (
+    OcrServiceError,
+    _call_ocr_space,
+    _call_paddle_ocr,
+    _download_cloudinary_document,
+    score_semantic_similarity,
+)
 
 
 def response(payload, status=200):
     result = Mock(status_code=status, text=str(payload))
     result.json.return_value = payload
     return result
+
+
+def download_response(content=b"document", status=200, content_type="application/pdf"):
+    result = Mock(status_code=status, content=content)
+    result.headers = {"content-type": content_type, "content-length": str(len(content))}
+    return result
+
+
+def test_cloudinary_download_uses_signed_url_and_returns_bytes():
+    document = {"document_id": "DOC-1", "mime_type": "application/pdf"}
+    with patch("services.ocr_service.requests.get", return_value=download_response()) as get:
+        assert _download_cloudinary_document(document, "https://signed.internal/url") == b"document"
+    get.assert_called_once_with("https://signed.internal/url", timeout=90)
+
+
+@pytest.mark.parametrize(
+    "status,code",
+    [(401, "CLOUDINARY_AUTH_ERROR"), (403, "CLOUDINARY_AUTH_ERROR"), (404, "CLOUDINARY_ASSET_NOT_FOUND")],
+)
+def test_cloudinary_download_classifies_private_asset_errors(status, code):
+    document = {"document_id": "DOC-1", "mime_type": "application/pdf"}
+    with patch("services.ocr_service.requests.get", return_value=download_response(status=status)):
+        with pytest.raises(OcrServiceError) as caught:
+            _download_cloudinary_document(document, "https://signed.internal/url")
+    assert caught.value.code == code
 
 
 def test_success():

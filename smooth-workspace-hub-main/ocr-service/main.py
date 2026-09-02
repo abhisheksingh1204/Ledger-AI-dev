@@ -73,7 +73,7 @@ def process_document_route(
     _validate_internal_token(x_internal_token)
 
     try:
-        structured = process_document(payload.documentId)
+        structured = process_document(payload.documentId, payload.signedDownloadUrl)
         return {"success": True, "data": structured}
     except OcrServiceError as exc:
         detail = {

@@ -175,8 +175,10 @@ async function runReconciliation(sessionId, userId) {
   const invoices = await db('invoices').where({ session_id: session.id, user_id: userId });
   const transactions = await db('bank_transactions').where({ session_id: session.id, user_id: userId }).whereIn('status', ['PENDING', 'EXTRACTED']);
   const results = [];
+  let runId = null;
   await db.transaction(async (trx) => {
     const [run] = await trx('reconciliation_runs').insert({ run_id: `RUN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, session_id: session.id, user_id: userId, status: 'RUNNING' }).returning('*');
+    runId = run.run_id;
     await trx('audit_log').insert({ action: 'RECONCILIATION_STARTED', table_name: 'reconciliation_runs', record_id: run.id, user_id: userId, new_value: { sessionId } });
     const used = new Set();
     for (const invoice of invoices) {
@@ -228,9 +230,40 @@ async function runReconciliation(sessionId, userId) {
      await trx('reconciliation_sessions').where({ id: session.id, user_id: userId }).update({ status: 'RECONCILED', updated_at: trx.fn.now() });
     await trx('audit_log').insert({ action: 'RECONCILIATION_COMPLETED', table_name: 'reconciliation_runs', record_id: run.id, user_id: userId, new_value: { sessionId } });
   });
-  return { totalInvoices: invoices.length, autoMatched: results.filter((r) => r.matchType === 'AUTO_MATCH').length, manualReview: results.filter((r) => r.matchType === 'MANUAL_REVIEW').length, unmatched: results.filter((r) => r.matchType === 'UNMATCHED').length, results };
+  return buildReconciliationResult({
+    totalInvoices: invoices.length,
+    results,
+    runId,
+    sessionId
+  });
+}
+
+function buildReconciliationResult({
+  totalInvoices = 0,
+  results = [],
+  summary = {},
+  runId = null,
+  sessionId
+}) {
+  const safeResults = Array.isArray(results) ? results : [];
+  return {
+    totalInvoices,
+    results: safeResults,
+    summary: {
+      autoMatched: summary.autoMatched ?? safeResults.filter((r) => r.matchType === 'AUTO_MATCH').length,
+      manualReview: summary.manualReview ?? safeResults.filter((r) => r.matchType === 'MANUAL_REVIEW').length,
+      unmatched: summary.unmatched ?? safeResults.filter((r) => r.matchType === 'UNMATCHED').length,
+      partialPayments: summary.partialPayments ?? safeResults.filter((r) => r.matchType === 'PARTIAL_PAYMENT').length,
+      multiTransactionMatches: summary.multiTransactionMatches ?? safeResults.filter((r) => r.matchType === 'MULTI_TRANSACTION_MATCH').length,
+      exceptions: summary.exceptions ?? safeResults.reduce((count, result) => count + (Array.isArray(result.warnings) ? result.warnings.length : 0), 0)
+    },
+    runId,
+    sessionId
+  };
 }
 module.exports = {
+  runReconciliation,
+  normalize,
   runReconciliation,
   normalize,
   compact,
@@ -242,5 +275,6 @@ module.exports = {
   score,
   buildSemanticQuery,
   buildSemanticPassage,
-  getSemanticScores
+  getSemanticScores,
+  buildReconciliationResult
 };

@@ -1,7 +1,7 @@
 const { GoogleGenAI, Type } = require('@google/genai');
 const { AppError } = require('../utils/api');
 
-const GEMINI_MODEL = process.env.GEMINI_OCR_MODEL || 'gemini-2.5-flash';
+const GEMINI_MODEL = process.env.GEMINI_OCR_MODEL || 'gemini-3.6-flash';
 const GEMINI_TIMEOUT_MS = Number(process.env.GEMINI_OCR_TIMEOUT_MS || 120000);
 const OCR_INSTRUCTION = [
   'Extract all visible text from this financial document.',
@@ -48,7 +48,7 @@ function normalizeGeminiResponse(value, documentType) {
   };
 }
 
-async function extractWithGemini({ buffer, mimeType, documentType }) {
+async function extractWithGemini({ buffer, mimeType, documentType, documentId = 'unknown' }) {
   if (!isGeminiConfigured()) {
     throw new AppError('GEMINI_NOT_CONFIGURED', 'GEMINI_API_KEY is not configured.', 503);
   }
@@ -56,6 +56,8 @@ async function extractWithGemini({ buffer, mimeType, documentType }) {
   const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), GEMINI_TIMEOUT_MS);
+  const startedAt = Date.now();
+  console.info('Gemini OCR fallback started document=%s', documentId);
 
   try {
     const response = await ai.models.generateContent({
@@ -93,16 +95,33 @@ async function extractWithGemini({ buffer, mimeType, documentType }) {
       signal: controller.signal
     });
 
-    return normalizeGeminiResponse(response.text, documentType);
+    const result = normalizeGeminiResponse(response.text, documentType);
+    console.info('Gemini OCR completed document=%s duration_ms=%s', documentId, Date.now() - startedAt);
+    return result;
   } catch (error) {
+    const status = Number(error.status || error.statusCode || error.response?.status);
+    const message = String(error?.message || 'Gemini OCR provider failed.')
+      .replace(/AIza[\w-]+/g, '[redacted]')
+      .replace(/[A-Za-z0-9_-]{32,}/g, '[redacted]');
     if (error.name === 'AbortError') {
+      console.warn('Gemini OCR failed document=%s reason=GEMINI_TIMEOUT duration_ms=%s', documentId, Date.now() - startedAt);
       throw new AppError('GEMINI_TIMEOUT', 'Gemini OCR timed out.', 504);
     }
     if (error instanceof AppError) throw error;
 
-    const status = Number(error.status || error.statusCode);
-    if (status === 429) throw new AppError('GEMINI_RATE_LIMITED', 'Gemini OCR rate limit reached.', 429);
-    if (status === 401 || status === 403) throw new AppError('GEMINI_AUTH_FAILED', 'Gemini OCR authentication failed.', 502);
+    if (status === 429) {
+      console.warn('Gemini OCR failed document=%s reason=GEMINI_RATE_LIMIT duration_ms=%s', documentId, Date.now() - startedAt);
+      throw new AppError('GEMINI_RATE_LIMIT', 'Gemini OCR rate limit reached.', 429);
+    }
+    if (status === 401 || status === 403) {
+      console.warn('Gemini OCR failed document=%s reason=GEMINI_AUTH_ERROR duration_ms=%s', documentId, Date.now() - startedAt);
+      throw new AppError('GEMINI_AUTH_ERROR', 'Gemini OCR authentication failed.', 502);
+    }
+    if ((status === 400 && /model|invalid|not found/i.test(message)) || status === 404) {
+      console.warn('Gemini OCR failed document=%s reason=GEMINI_INVALID_MODEL duration_ms=%s', documentId, Date.now() - startedAt);
+      throw new AppError('GEMINI_INVALID_MODEL', 'The configured Gemini OCR model is invalid.', 502);
+    }
+    console.warn('Gemini OCR failed document=%s reason=GEMINI_PROVIDER_ERROR status=%s duration_ms=%s', documentId, status || 'unknown', Date.now() - startedAt);
     throw new AppError('GEMINI_PROVIDER_ERROR', 'Gemini OCR provider failed.', 502);
   } finally {
     clearTimeout(timeout);
