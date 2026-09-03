@@ -56,7 +56,26 @@ export type SessionDocument = {
 
 export type ReconciliationResult = {
   invoiceId: string;
+  customerName?: string;
+  amount?: string | number;
+  invoiceDate?: string;
   transactionId?: string;
+  transaction?: {
+    transactionId: string;
+    description?: string;
+    amount?: string | number;
+    transactionDate?: string;
+    bankAccount?: string | null;
+  };
+  bestCandidate?: {
+    transactionId: string;
+    description?: string;
+    amount?: string | number;
+    transactionDate?: string;
+    confidence: number;
+    scores: Record<string, number>;
+  };
+  reason?: { summary: string; signals: string[] };
   matchType: string;
   confidence?: number;
   scores?: {
@@ -134,6 +153,7 @@ export async function runReconciliation(sessionId: string) {
       runId: string | null;
       sessionId: string;
       results: ReconciliationResult[];
+      weights?: Record<string, number>;
     };
   }>(`/api/reconciliation/${encodeURIComponent(sessionId)}/run`, { method: "POST" });
 
@@ -144,11 +164,39 @@ export async function runReconciliation(sessionId: string) {
   return response;
 }
 
+export async function getInvoiceReconciliation(invoiceId: string) {
+  return request<{
+    success: true;
+    data: {
+      invoice: Record<string, unknown>;
+      match: (ReconciliationResult & { matchId: number; status: string }) | null;
+      transaction: ReconciliationResult["transaction"] | null;
+      weights: Record<string, number>;
+      exceptions: Array<{ id: number; type: string; severity: string; description: string; transactionId?: number; createdAt: string; resolvedAt?: string }>;
+      document: { documentId: string; filename: string } | null;
+    };
+  }>(`/api/reconciliation/invoice/${encodeURIComponent(invoiceId)}`, { method: "GET" });
+}
+
+export async function getDocumentView(documentId: string) {
+  return request<{ success: true; data: { documentId: string; filename: string; mimeType: string; url: string } }>(
+    `/api/documents/${encodeURIComponent(documentId)}/view`,
+    { method: "GET" },
+  );
+}
+
 export async function getReports() {
   return request<{
     success: true;
     data: { overview: ReportOverview; invoices: { items: InvoiceReport[] } };
   }>("/api/reports");
+}
+
+export async function getExceptions(sessionId: string) {
+  return request<{
+    success: true;
+    data: { items: Array<{ id: number; exception_type: string; severity: string; description: string; created_at: string; invoice_id?: number; transaction_id?: number }> };
+  }>(`/api/reconciliation/${encodeURIComponent(sessionId)}/exceptions`, { method: "GET" });
 }
 
 export async function askInvoice(invoiceId: string, question: string, conversationId?: string) {
@@ -165,4 +213,49 @@ export async function askInvoice(invoiceId: string, question: string, conversati
 
 export async function getInvoices() {
   return request<{ success: true; data: { items: InvoiceReport[] } }>("/api/reports/invoices");
+}
+
+export type HistoryRun = {
+  run_id: string;
+  session_id: string;
+  version: number;
+  created_at: string;
+  total_invoices: number;
+  auto_matched: number;
+  manual_review: number;
+  unmatched: number;
+  exceptions: number;
+  match_rate: number;
+  average_confidence: number;
+};
+
+export type HistoricalRun = {
+  run: { runId: string; sessionId: string | number; version: number; status: string; createdAt: string; completedAt?: string; processingTimeMs?: number; averageProcessingTimeMs?: number; averageConfidence: number; matchRate: number };
+  summary: { totalInvoices: number; autoMatched: number; manualReview: number; unmatched: number; exceptions: number };
+  weights: Record<string, number>;
+  thresholds: Record<string, number>;
+  results: Array<ReconciliationResult & { matchId: number; invoice: Record<string, unknown>; status: string; amountDifferencePercent?: string; } >;
+  exceptions: Array<{ exceptionId: number; type: string; severity: string; description: string; invoiceId?: string; transactionId?: string; createdAt: string; resolvedAt?: string }>;
+};
+
+export async function getReconciliationHistory(params: { page?: number; limit?: number; from?: string; to?: string; status?: string } = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => { if (value != null && value !== "") query.set(key, String(value)); });
+  return request<{ success: true; data: { runs: HistoryRun[]; page: number; limit: number } }>(`/api/reconciliation/history${query.toString() ? `?${query}` : ""}`);
+}
+
+export async function getHistoricalRun(runId: string) {
+  return request<{ success: true; data: HistoricalRun }>(`/api/reconciliation/history/${encodeURIComponent(runId)}`);
+}
+
+export async function recheckHistoricalRun(runId: string) {
+  return request<{ success: true; data: { runId: string; sessionId: string; summary: HistoricalRun["summary"] } }>(`/api/reconciliation/history/${encodeURIComponent(runId)}/recheck`, { method: "POST" });
+}
+
+export async function getSessionHistory(sessionId: string) {
+  return request<{ success: true; data: { sessionId: string; runs: Array<{ runId: string; version: number; createdAt: string; matchRate: number; averageConfidence: number } & HistoricalRun["summary"]> } }>(`/api/reconciliation/${encodeURIComponent(sessionId)}/history`);
+}
+
+export async function compareHistoricalRuns(from: string, to: string) {
+  return request<{ success: true; data: { from: HistoricalRun["run"]; to: HistoricalRun["run"]; summary: { from: HistoricalRun["summary"]; to: HistoricalRun["summary"] }; changed: Array<{ invoiceId: string; from: string | null; to: string }> } }>(`/api/reconciliation/history/compare?from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`);
 }

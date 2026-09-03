@@ -4,6 +4,8 @@ import json
 import logging
 import os
 import time
+from pathlib import Path
+from threading import Lock
 from io import BytesIO
 from dataclasses import dataclass
 from typing import Any
@@ -31,7 +33,9 @@ OCR_MAX_IMAGE_DIMENSION = int(os.getenv("OCR_MAX_IMAGE_DIMENSION", "2500"))
 LOGGER = logging.getLogger(__name__)
 _PADDLE_OCR_MODEL = None
 _E5_MODEL = None
-_MODEL_READINESS = {"paddleocr": False, "e5": False}
+_PADDLE_INIT_LOCK = Lock()
+_PADDLE_INIT_ERROR: OcrServiceError | None = None
+_MODEL_READINESS = {"paddleocr": "loading", "e5": "loading"}
 
 
 @dataclass
@@ -50,19 +54,30 @@ class OcrServiceError(Exception):
 def warm_service_models() -> None:
     """Load OCR and embedding models once during service startup."""
     started_at = time.monotonic()
+    _MODEL_READINESS["paddleocr"] = "loading"
     try:
         _get_paddle_ocr()
         _warm_paddle_inference()
-        _MODEL_READINESS["paddleocr"] = True
+        _MODEL_READINESS["paddleocr"] = "ready"
         LOGGER.info("PaddleOCR ready model_det=%s model_rec=%s init_ms=%s", PADDLE_DET_MODEL_NAME, PADDLE_REC_MODEL_NAME, round((time.monotonic() - started_at) * 1000))
-    except Exception:
-        LOGGER.exception("Failed to warm PaddleOCR model.")
+    except Exception as exc:
+        _MODEL_READINESS["paddleocr"] = "unavailable"
+        LOGGER.error(
+            "PaddleOCR warm-up failed error_type=%s error_message=%s model_det=%s model_rec=%s",
+            type(exc).__name__,
+            str(exc),
+            PADDLE_DET_MODEL_NAME,
+            PADDLE_REC_MODEL_NAME,
+            exc_info=True,
+        )
 
+    _MODEL_READINESS["e5"] = "loading"
     try:
         _load_e5_model()
-        _MODEL_READINESS["e5"] = True
-    except Exception:
-        LOGGER.exception("Failed to warm E5 model.")
+        _MODEL_READINESS["e5"] = "ready"
+    except Exception as exc:
+        _MODEL_READINESS["e5"] = "unavailable"
+        LOGGER.error("Failed to warm E5 model error_type=%s error_message=%s", type(exc).__name__, str(exc), exc_info=True)
 
 
 def _get_env_int(name: str, default: int) -> int:
@@ -97,28 +112,33 @@ def _get_timeout_seconds() -> int:
 
 
 def _get_paddle_ocr():
-    global _PADDLE_OCR_MODEL
+    global _PADDLE_OCR_MODEL, _PADDLE_INIT_ERROR
     if _PADDLE_OCR_MODEL is not None:
         return _PADDLE_OCR_MODEL
+    if _PADDLE_INIT_ERROR is not None:
+        raise _PADDLE_INIT_ERROR
 
-    try:
-        from paddleocr import PaddleOCR
-    except Exception as exc:  # pragma: no cover - import failure is environment-specific
-        raise OcrServiceError(
-            code="PADDLEOCR_UNAVAILABLE",
-            message=f"PaddleOCR is unavailable: {exc}",
-            status_code=503,
-        ) from exc
+    with _PADDLE_INIT_LOCK:
+        if _PADDLE_OCR_MODEL is not None:
+            return _PADDLE_OCR_MODEL
+        if _PADDLE_INIT_ERROR is not None:
+            raise _PADDLE_INIT_ERROR
 
-    try:
-        import paddle
-        paddle.set_device("cpu")
-        paddle.set_num_threads(max(1, PADDLE_CPU_THREADS))
-    except Exception:
-        pass
+        cache_paths = _paddle_model_cache_paths()
+        try:
+            from paddleocr import PaddleOCR
+        except Exception as exc:  # pragma: no cover - import failure is environment-specific
+            _PADDLE_INIT_ERROR = _paddle_init_error(exc, cache_paths)
+            raise _PADDLE_INIT_ERROR from exc
 
-    init_attempts = [
-        {
+        try:
+            import paddle
+            paddle.set_device("cpu")
+            paddle.set_num_threads(max(1, PADDLE_CPU_THREADS))
+        except Exception:
+            pass
+
+        init_attempts = [{
             "device": "cpu",
             "enable_mkldnn": False,
             "use_doc_orientation_classify": False,
@@ -126,24 +146,60 @@ def _get_paddle_ocr():
             "use_textline_orientation": False,
             "text_detection_model_name": PADDLE_DET_MODEL_NAME,
             "text_recognition_model_name": PADDLE_REC_MODEL_NAME,
-        }
-    ]
+        }]
 
-    last_error: Exception | None = None
-    for kwargs in init_attempts:
-        try:
-            _PADDLE_OCR_MODEL = PaddleOCR(**kwargs)
-            return _PADDLE_OCR_MODEL
-        except TypeError as exc:
-            last_error = exc
-        except Exception as exc:
-            last_error = exc
+        last_error: Exception | None = None
+        for kwargs in init_attempts:
+            try:
+                _PADDLE_OCR_MODEL = PaddleOCR(**kwargs)
+                return _PADDLE_OCR_MODEL
+            except TypeError as exc:
+                last_error = exc
+            except Exception as exc:
+                last_error = exc
 
-    raise OcrServiceError(
-        code="PADDLEOCR_UNAVAILABLE",
-        message=f"Unable to initialize PaddleOCR: {last_error}",
-        status_code=503,
-    ) from last_error
+        _PADDLE_INIT_ERROR = _paddle_init_error(last_error, cache_paths)
+        raise _PADDLE_INIT_ERROR from last_error
+
+
+def _paddle_model_cache_paths() -> dict[str, Path]:
+    root = Path.home() / ".paddlex" / "official_models"
+    return {
+        "det": root / PADDLE_DET_MODEL_NAME,
+        "rec": root / PADDLE_REC_MODEL_NAME,
+    }
+
+
+def _model_cache_status(path: Path) -> str:
+    required = ("inference.yml", "inference.json", "inference.pdiparams")
+    try:
+        if not path.is_dir():
+            return "missing"
+        for filename in required:
+            file_path = path / filename
+            if not file_path.is_file() or file_path.stat().st_size == 0:
+                return f"invalid:{filename}"
+            with file_path.open("rb") as stream:
+                stream.read(1)
+        return "readable"
+    except OSError as exc:
+        return f"unreadable:{type(exc).__name__}"
+
+
+def _paddle_init_error(error: Exception | None, cache_paths: dict[str, Path]) -> OcrServiceError:
+    actual_error = error or RuntimeError("unknown initialization error")
+    LOGGER.error(
+        "PaddleOCR initialization failed error_type=%s error_message=%s model_det=%s model_rec=%s cache_path=%s cache_status_det=%s cache_status_rec=%s",
+        type(actual_error).__name__,
+        str(actual_error),
+        PADDLE_DET_MODEL_NAME,
+        PADDLE_REC_MODEL_NAME,
+        cache_paths["det"].parent,
+        _model_cache_status(cache_paths["det"]),
+        _model_cache_status(cache_paths["rec"]),
+        exc_info=True,
+    )
+    return OcrServiceError("PADDLEOCR_UNAVAILABLE", "PaddleOCR is unavailable.", 503)
 
 
 def _load_e5_model():

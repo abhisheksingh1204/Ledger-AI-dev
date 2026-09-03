@@ -15,6 +15,14 @@ const OCR_SERVICE_URL = process.env.OCR_SERVICE_URL || 'http://127.0.0.1:8001';
 const OCR_SERVICE_INTERNAL_TOKEN = process.env.OCR_SERVICE_INTERNAL_TOKEN || '';
 const OCR_SERVICE_TIMEOUT_MS = Number(process.env.OCR_SERVICE_TIMEOUT_MS || 120000);
 
+function getFetchFailureDetails(error) {
+  return {
+    cause: error?.cause?.code || error?.code || 'NETWORK_ERROR',
+    message: error?.cause?.message || error?.message || 'fetch failed',
+    endpoint: OCR_SERVICE_URL
+  };
+}
+
 function toMoneyString(value) {
   if (value === null || value === undefined || value === '') {
     return null;
@@ -120,8 +128,9 @@ async function callOcrService(document) {
       ? error
       : new AppError(
           'OCR_SERVICE_UNAVAILABLE',
-          error?.message || 'OCR service is unavailable.',
-          503
+          `OCR service request failed at ${OCR_SERVICE_URL}: ${getFetchFailureDetails(error).message}`,
+          503,
+          getFetchFailureDetails(error)
         );
   } finally {
     clearTimeout(timeout);
@@ -329,10 +338,11 @@ async function callOcrWithFallback(document) {
 
 function buildInvoiceRow(document, extraction) {
   const invoice = extraction.invoice || {};
+  const invoiceNumber = invoice.invoice_number || getInvoiceDocumentNumber(document);
 
   return {
-    invoice_id: getInvoiceDocumentNumber(document),
-    invoice_number: invoice.invoice_number || null,
+    invoice_id: invoiceNumber,
+    invoice_number: invoiceNumber,
     user_id: document.user_id,
     session_id: document.session_id,
     document_id: document.id,
@@ -344,7 +354,7 @@ function buildInvoiceRow(document, extraction) {
     invoice_date: invoice.invoice_date || null,
     due_date: invoice.due_date || null,
     currency: invoice.currency || null,
-    payment_reference: invoice.payment_reference || null,
+    payment_reference: invoice.payment_reference || invoice.purchase_order_reference || null,
     status: 'EXTRACTED',
     created_at: db.fn.now(),
     updated_at: db.fn.now()
@@ -378,6 +388,7 @@ function buildBankTransactionRows(document, extraction) {
     currency: bankStatement.currency || null,
     status: 'EXTRACTED',
     reference: transaction.reference || null,
+    invoice_reference: transaction.invoice_reference || bankStatement.invoice_reference || null,
     direction: transaction.direction || null,
     debit: toMoneyString(transaction.debit || null),
     credit: toMoneyString(transaction.credit || null),
@@ -386,79 +397,139 @@ function buildBankTransactionRows(document, extraction) {
   }));
 }
 
+async function persistInvoice(trx, document, extraction) {
+  const invoiceRow = buildInvoiceRow(document, extraction);
+  const existingInvoice = await trx('invoices')
+    .where({
+      user_id: document.user_id,
+      session_id: document.session_id,
+      document_id: document.id
+    })
+    .forUpdate()
+    .first();
+
+  if (existingInvoice) {
+    const [updatedInvoice] = await trx('invoices')
+      .where({ id: existingInvoice.id })
+      .update({
+        ...invoiceRow,
+        created_at: existingInvoice.created_at,
+        updated_at: trx.fn.now()
+      }, '*');
+    return updatedInvoice;
+  }
+
+  const [insertedInvoice] = await trx('invoices')
+    .insert(invoiceRow)
+    .returning('*');
+  return insertedInvoice;
+}
+
+async function persistBankTransactions(trx, document, extraction) {
+  const transactionRows = buildBankTransactionRows(document, extraction);
+  const transactionIds = transactionRows.map((row) => row.transaction_id);
+  await trx('bank_transactions')
+    .where({ user_id: document.user_id, document_id: document.id })
+    .whereNotIn('transaction_id', transactionIds.length > 0 ? transactionIds : ['__NO_TRANSACTIONS__'])
+    .del();
+
+  for (const transactionRow of transactionRows) {
+    const [existingTransaction] = await trx('bank_transactions')
+      .where({
+        user_id: transactionRow.user_id,
+        transaction_id: transactionRow.transaction_id
+      })
+      .forUpdate()
+      .select('id');
+
+    if (existingTransaction) {
+      await trx('bank_transactions')
+        .where({ id: existingTransaction.id })
+        .update({
+          ...transactionRow,
+          created_at: trx.raw('created_at')
+        });
+    } else {
+      await trx('bank_transactions').insert(transactionRow);
+    }
+  }
+
+}
+
 async function persistExtraction(document, extraction) {
-  return db.transaction(async (trx) => {
-    if (document.document_type === 'INVOICE') {
-      await trx('invoices').where({ document_id: document.id }).del();
-
-      const invoiceRow = buildInvoiceRow(document, extraction);
-      await trx('invoices').insert(invoiceRow);
-    }
-
-    if (document.document_type === 'BANK_STATEMENT') {
-      await trx('bank_transactions').where({ document_id: document.id }).del();
-
-      const transactionRows = buildBankTransactionRows(document, extraction);
-      if (transactionRows.length > 0) {
-        await trx('bank_transactions').insert(transactionRows);
+  try {
+    return await db.transaction(async (trx) => {
+      if (document.document_type === 'INVOICE') {
+        await persistInvoice(trx, document, extraction);
       }
-    }
 
-    await storeDocumentExtraction(document.id, extraction, trx);
+      if (document.document_type === 'BANK_STATEMENT') {
+        await persistBankTransactions(trx, document, extraction);
+      }
 
-    const [updatedDocument] = await trx('documents')
-      .where({ id: document.id })
-      .update(
+      await storeDocumentExtraction(document.id, extraction, trx);
+
+      const [updatedDocument] = await trx('documents')
+        .where({ id: document.id })
+        .update(
+          {
+            processing_status: 'COMPLETED',
+            updated_at: trx.fn.now()
+          },
+          [
+            'id',
+            'document_id',
+            'document_type',
+            'processing_status',
+            'extracted_data'
+          ]
+        );
+
+      await insertAuditLog(
         {
-          processing_status: 'COMPLETED',
-          updated_at: trx.fn.now()
+          action: 'DOCUMENT_PROCESSED',
+          tableName: 'documents',
+          recordId: document.id,
+          userId: document.user_id,
+          newValue: {
+            documentId: document.document_id,
+            documentType: document.document_type,
+            processingStatus: 'COMPLETED'
+          }
         },
-        [
-          'id',
-          'document_id',
-          'document_type',
-          'processing_status',
-          'extracted_data'
-        ]
+        trx
       );
 
-    await insertAuditLog(
-      {
-        action: 'DOCUMENT_PROCESSED',
-        tableName: 'documents',
-        recordId: document.id,
+      return updatedDocument || {
+        id: document.id,
+        document_id: document.document_id,
+        document_type: document.document_type,
+        processing_status: 'COMPLETED',
+        extracted_data: extraction
+      };
+    });
+  } catch (error) {
+    if (error?.code === '23505') {
+      console.error('Invoice or bank persistence conflict', {
+        documentId: document.document_id,
+        sessionId: document.session_id,
         userId: document.user_id,
-        newValue: {
-          documentId: document.document_id,
-          documentType: document.document_type,
-          processingStatus: 'COMPLETED'
-        }
-      },
-      trx
-    );
-
-    return updatedDocument || {
-      id: document.id,
-      document_id: document.document_id,
-      document_type: document.document_type,
-      processing_status: 'COMPLETED',
-      extracted_data: extraction
-    };
-  });
+        invoiceId: document.document_type === 'INVOICE'
+          ? buildInvoiceRow(document, extraction).invoice_id
+          : undefined
+      });
+      throw new AppError(
+        'INVOICE_PERSISTENCE_CONFLICT',
+        'The extracted document conflicts with an existing financial record.',
+        409
+      );
+    }
+    throw error;
+  }
 }
 
 async function processSingleDocument(documentId, userId) {
   const document = await getDocumentByDocumentId(documentId, userId);
-
-  if (document.processing_status === 'COMPLETED' && document.extracted_data) {
-    return {
-      documentId: document.document_id,
-      documentType: document.document_type,
-      processingStatus: document.processing_status,
-      extractedData: document.extracted_data,
-      skipped: true
-    };
-  }
 
   if (document.processing_status === 'OCR_PROCESSING' || document.processing_status === 'EXTRACTING') {
     throw new AppError(

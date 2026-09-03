@@ -12,6 +12,7 @@ from utils import (
     find_date_in_text,
     maybe_extract_money_after_label,
     normalize_money,
+    parse_amount_from_line,
     split_lines,
 )
 
@@ -19,10 +20,13 @@ from utils import (
 INVOICE_LABELS = {
     "invoice_number": [
         re.compile(r"(?:invoice\s*(?:no\.?|number|#)|inv\s*(?:no\.?|number|#)|bill\s*(?:no\.?|number|#)|tax\s*invoice\s*(?:no\.?|number|#))\s*[:#\-]?\s*(?P<value>[A-Z0-9/\-_.]+)", re.I),
-        re.compile(r"\binvoice\s*[:\-]?\s*(?P<value>[A-Z0-9/\-_.]+)\b", re.I),
+        re.compile(r"\binvoice\s*[:\-]\s*(?P<value>[A-Z0-9/\-_.]+)\b", re.I),
     ],
     "payment_reference": [
         re.compile(r"(?:payment\s*reference|reference\s*no\.?|ref\s*no\.?|utr|txn\s*id|transaction\s*id)\s*[:#\-]?\s*(?P<value>[A-Z0-9/\-_.]+)", re.I),
+    ],
+    "purchase_order_reference": [
+        re.compile(r"(?:po|purchase\s*order)\s*reference\s*[:#\-]?\s*(?P<value>[A-Z0-9/\-_.]+)", re.I),
     ],
 }
 
@@ -44,10 +48,32 @@ BANK_TXN_ROW_PATTERNS = [
 ]
 
 
+def _extract_labeled_money_nearby(lines: list[str], labels: list[str]) -> Optional[str]:
+    label_pattern = re.compile(
+        r"(?<![a-z0-9])(?:" + "|".join(re.escape(label) for label in labels) + r")(?![a-z0-9])\s*[:#\-]?\s*(?P<value>.*)$",
+        re.I,
+    )
+    for index, line in enumerate(lines):
+        if not label_pattern.search(line):
+            continue
+        candidates = [line]
+        candidates.extend(lines[index + 1:index + 3])
+        candidates.extend(reversed(lines[max(0, index - 3):index]))
+        candidates.extend(lines[index + 1:index + 2])
+        for candidate in candidates:
+            if not re.search(r"(?:\$|USD|INR|EUR|GBP|Rs\.?|â‚¹)", candidate, re.I):
+                continue
+            amount = parse_amount_from_line(candidate)
+            if amount:
+                return amount
+    return None
+
+
 def extract_invoice_from_text(raw_text: str) -> dict[str, Any]:
     lines = split_lines(raw_text)
     invoice_number = extract_first_label_value(lines, INVOICE_LABELS["invoice_number"])
     payment_reference = extract_first_label_value(lines, INVOICE_LABELS["payment_reference"])
+    purchase_order_reference = extract_first_label_value(lines, INVOICE_LABELS["purchase_order_reference"])
 
     invoice_date = None
     due_date = None
@@ -71,43 +97,35 @@ def extract_invoice_from_text(raw_text: str) -> dict[str, Any]:
         if due_date:
             break
 
-    subtotal = maybe_extract_money_after_label(
-        lines, ["subtotal", "sub total", "amount before tax"]
+    subtotal = _extract_labeled_money_nearby(lines, ["subtotal", "sub total", "amount before tax"])
+    tax_amount = _extract_labeled_money_nearby(lines, ["gst", "tax", "vat", "igst", "cgst", "sgst"])
+    shipping = _extract_labeled_money_nearby(lines, ["shipping", "freight", "delivery"])
+    total_amount = _extract_labeled_money_nearby(
+        lines, ["grand total", "total amount", "invoice total", "amount due", "amount payable", "net payable", "total"]
     )
-    tax_amount = maybe_extract_money_after_label(lines, ["gst", "tax", "vat", "igst", "cgst", "sgst"])
-    total_amount = maybe_extract_money_after_label(
-        lines, ["grand total", "total amount", "invoice total", "amount due", "amount payable", "total"]
-    )
-
-    if not total_amount:
-        for line in reversed(lines[:12]):
-            amount = normalize_money(line)
-            if amount:
-                total_amount = amount
-                break
 
     currency = detect_currency(raw_text)
 
     customer_name = extract_first_label_value(
         lines,
         [
-            re.compile(r"(?:bill(?:ed)?\s*to|customer|buyer|sold\s*to|ship\s*to)\s*[:\-]?\s*(?P<value>.+)$", re.I)
+            re.compile(r"(?:bill(?:ed)?\s*to|customer|buyer|client|to|sold\s*to|ship\s*to)\s*[:\-]?\s*(?P<value>.+)$", re.I)
         ],
     ) or extract_following_line_value(lines, ["bill to", "billed to", "customer", "buyer"])
 
     seller_name = extract_first_label_value(
         lines,
         [
-            re.compile(r"(?:sold\s*by|vendor|supplier|from|bill(?:ed)?\s*from)\s*[:\-]?\s*(?P<value>.+)$", re.I)
+            re.compile(r"(?:sold\s*by|vendor|supplier|seller|from|bill(?:ed)?\s*from)\s*[:\-]?\s*(?P<value>.+)$", re.I)
         ],
     ) or extract_following_line_value(lines, ["sold by", "vendor", "supplier", "bill from", "billed from"])
 
     if not invoice_number:
-        # Fallback: scan top lines for codes like INV-1001.
+        # Fallback only accepts identifier-like values containing a digit.
         for line in lines[:12]:
-            match = re.search(r"\b(?:inv|invoice|bill)[\s#:\-]*([A-Z0-9/\-_.]+)\b", line, re.I)
+            match = re.search(r"\b((?:INV(?:OICE)?|BILL)[\s#:\-]*[A-Z0-9/\-_.]*\d[A-Z0-9/\-_.]*)\b", line, re.I)
             if match:
-                invoice_number = match.group(1)
+                invoice_number = match.group(1).strip(" :-")
                 break
 
     if not payment_reference:
@@ -136,8 +154,10 @@ def extract_invoice_from_text(raw_text: str) -> dict[str, Any]:
             "currency": currency,
             "subtotal": subtotal,
             "tax_amount": tax_amount,
+            "shipping": shipping,
             "total_amount": total_amount,
             "payment_reference": payment_reference,
+            "purchase_order_reference": purchase_order_reference,
         },
         "warnings": warnings,
     }
@@ -230,6 +250,16 @@ def _parse_transaction_line(line: str, document_id: str, index: int) -> Optional
 def extract_bank_statement_from_text(raw_text: str, document_id: str) -> dict[str, Any]:
     lines = split_lines(raw_text)
 
+    settlement_signals = [
+        "bank settlement invoice",
+        "bank reference",
+        "invoice ref",
+        "processing date",
+        "settlement confirmed",
+        "amount debited",
+    ]
+    is_settlement = sum(signal in raw_text.lower() for signal in settlement_signals) >= 2
+
     bank_name = extract_first_label_value(
         lines,
         [re.compile(r"(?:bank\s*name|branch)\s*[:\-]?\s*(?P<value>.+)$", re.I)],
@@ -264,10 +294,40 @@ def extract_bank_statement_from_text(raw_text: str, document_id: str) -> dict[st
     currency = detect_currency(raw_text)
 
     transaction_lines = []
-    for index, line in enumerate(lines):
-        parsed = _parse_transaction_line(line, document_id=document_id, index=index)
-        if parsed:
-            transaction_lines.append(parsed)
+    if is_settlement:
+        def labeled_value(patterns: list[str]) -> Optional[str]:
+            pattern = re.compile(r"(?:" + "|".join(patterns) + r")\s*[:#\-]?\s*(?P<value>.+)$", re.I)
+            for line in lines:
+                match = pattern.search(line)
+                if match:
+                    return clean_name(match.group("value"))
+            return None
+
+        invoice_reference = labeled_value([r"invoice\s*ref(?:erence)?", r"invoice\s*(?:no\.?|number)"])
+        bank_reference = labeled_value([r"bank\s*reference", r"settlement\s*(?:ref(?:erence)?|id)"])
+        processing_date_value = labeled_value([r"processing\s*date", r"settlement\s*date"])
+        settlement_amount = _extract_labeled_money_nearby(lines, ["total amount", "settlement amount"])
+        settlement_name = labeled_value([r"customer", r"from", r"payer", r"beneficiary"])
+        processing_date = find_date_in_text(processing_date_value or "")
+        if processing_date and settlement_amount:
+            description_parts = [part for part in [settlement_name, "settlement", invoice_reference] if part]
+            transaction_lines.append({
+                "transaction_id": bank_reference or deterministic_id("BTX", document_id, "settlement"),
+                "transaction_date": processing_date,
+                "description": clean_name(" ".join(description_parts)),
+                "reference": bank_reference,
+                "invoice_reference": invoice_reference,
+                "direction": "CREDIT",
+                "amount": settlement_amount,
+                "debit": None,
+                "credit": settlement_amount,
+                "balance": None,
+            })
+    else:
+        for index, line in enumerate(lines):
+            parsed = _parse_transaction_line(line, document_id=document_id, index=index)
+            if parsed:
+                transaction_lines.append(parsed)
 
     warnings = []
     if not transaction_lines:
@@ -278,6 +338,7 @@ def extract_bank_statement_from_text(raw_text: str, document_id: str) -> dict[st
         "document_type": "BANK_STATEMENT",
         "ocr": {},
         "bank_statement": {
+            "document_subtype": "BANK_SETTLEMENT" if is_settlement else "BANK_STATEMENT",
             "bank_name": clean_name(bank_name) if bank_name else None,
             "account_holder": clean_name(account_holder) if account_holder else None,
             "masked_account_number": masked_account_number,

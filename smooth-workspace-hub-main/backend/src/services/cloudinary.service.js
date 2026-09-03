@@ -8,19 +8,34 @@ const {
 const { AppError } = require('../utils/api');
 
 const DEFAULT_DELIVERY_TYPE = 'authenticated';
+const UPLOAD_RETRIES = Number(process.env.CLOUDINARY_UPLOAD_RETRIES || 2);
+const RETRYABLE_NETWORK_ERRORS = new Set(['ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT']);
 
 function uploadBufferToCloudinary(buffer, options) {
-  return new Promise((resolve, reject) => {
+  const attempt = (attemptNumber) => new Promise((resolve, reject) => {
     const uploadStream = cloudinary.uploader.upload_stream(options, (error, result) => {
-      if (error) {
-        return reject(error);
+      if (!error) return resolve(result);
+
+      const code = error?.code || error?.errno;
+      if (RETRYABLE_NETWORK_ERRORS.has(code) && attemptNumber < UPLOAD_RETRIES) {
+        const delayMs = 500 * attemptNumber;
+        console.warn('Retrying Cloudinary upload after transient network error', {
+          code,
+          attempt: attemptNumber + 1,
+          delayMs
+        });
+        return setTimeout(() => {
+          attempt(attemptNumber + 1).then(resolve, reject);
+        }, delayMs);
       }
 
-      return resolve(result);
+      return reject(error);
     });
 
     Readable.from(buffer).pipe(uploadStream);
   });
+
+  return attempt(0);
 }
 
 function buildSignedDocumentUrl(document) {

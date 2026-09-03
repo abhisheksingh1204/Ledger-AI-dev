@@ -40,9 +40,9 @@ def health():
 
     from services.ocr_service import _MODEL_READINESS
 
-    paddleocr = "ready" if _MODEL_READINESS["paddleocr"] else "unavailable"
-    e5 = "ready" if _MODEL_READINESS["e5"] else "unavailable"
-    status = "ok" if database == "ready" and paddleocr == "ready" and e5 == "ready" else "degraded"
+    paddleocr = _MODEL_READINESS["paddleocr"]
+    e5 = _MODEL_READINESS["e5"]
+    status = "ok" if database == "ready" and paddleocr == "ready" and e5 == "ready" else "loading" if "loading" in {paddleocr, e5} else "degraded"
     return {
         "success": status == "ok",
         "status": status,

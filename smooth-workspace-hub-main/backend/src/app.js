@@ -18,12 +18,13 @@ const allowedOrigins = String(process.env.FRONTEND_URL || 'http://127.0.0.1:5173
   .split(',')
   .map((origin) => origin.trim())
   .filter(Boolean);
+const localOriginPattern = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/i;
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin || allowedOrigins.includes(origin) || localOriginPattern.test(origin)) return callback(null, true);
     return callback(new AppError('CORS_ORIGIN_DENIED', 'Frontend origin is not allowed.', 403));
   },
-  allowedHeaders: ['Content-Type', 'x-user-id'],
+  allowedHeaders: ['Content-Type', 'x-user-id', 'Authorization', 'Accept'],
   methods: ['GET', 'POST', 'OPTIONS']
 }));
 app.use(express.json({ limit: '1mb' }));

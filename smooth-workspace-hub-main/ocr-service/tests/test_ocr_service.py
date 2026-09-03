@@ -1,5 +1,7 @@
 import requests
 import pytest
+import services.ocr_service as ocr_service
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from services.ocr_service import (
@@ -7,8 +9,13 @@ from services.ocr_service import (
     _call_ocr_space,
     _call_paddle_ocr,
     _download_cloudinary_document,
+    _model_cache_status,
+    _paddle_init_error,
+    _get_paddle_ocr,
+    warm_service_models,
     score_semantic_similarity,
 )
+from extractors import extract_bank_statement_from_text, extract_invoice_from_text
 
 
 def response(payload, status=200):
@@ -130,3 +137,107 @@ def test_semantic_similarity_returns_e5_scores():
     assert result['provider'] == 'e5-small-v2'
     assert result['scores'][0]['semantic_score'] > result['scores'][1]['semantic_score']
     assert result['scores'][0]['passage'] == 'NEFT PAYMENT ABC TECHNOLOGIES INV1001'
+
+
+def test_bank_settlement_becomes_one_transaction_from_settlement_total():
+    extraction = extract_bank_statement_from_text(
+        """BANK SETTLEMENT INVOICE
+Invoice Ref: INV-2024-008743
+Processing Date: 2024-09-18
+Customer: Global Retail Inc.
+Bank Reference: FSB-2024-445821
+Total Amount: $20,315.00
+Settlement confirmed""",
+        "DOC-SETTLEMENT",
+    )
+    statement = extraction["bank_statement"]
+    assert statement["document_subtype"] == "BANK_SETTLEMENT"
+    assert len(statement["transactions"]) == 1
+    transaction = statement["transactions"][0]
+    assert transaction["transaction_id"] == "FSB-2024-445821"
+    assert transaction["transaction_date"] == "2024-09-18"
+    assert transaction["amount"] == "20315.00"
+    assert "INV-2024-008743" in transaction["description"]
+
+
+def test_invoice_labels_extract_real_values_without_treating_zip_as_money():
+    extraction = extract_invoice_from_text(
+        """TechCore Solutions
+From: TechCore Solutions
+To: Global Retail Inc.
+Invoice #: INV-2024-008743
+Invoice Date: 2024-09-15
+Due Date: 2024-10-15
+PO Reference: PO-2024-5521
+Address: Los Angeles, CA 90001
+Phone: 555-010-9001
+Subtotal: $18,300.00
+Tax: $1,647.00
+Shipping: $150.00
+Total: $20,097.00
+Currency: USD"""
+    )
+    invoice = extraction["invoice"]
+    assert invoice["invoice_number"] == "INV-2024-008743"
+    assert invoice["seller_name"] == "TechCore Solutions"
+    assert invoice["customer_name"] == "Global Retail Inc."
+    assert invoice["subtotal"] == "18300.00"
+    assert invoice["tax_amount"] == "1647.00"
+    assert invoice["shipping"] == "150.00"
+    assert invoice["total_amount"] == "20097.00"
+    assert invoice["currency"] == "USD"
+    assert invoice["purchase_order_reference"] == "PO-2024-5521"
+
+
+def test_invoice_fallback_number_only_used_when_label_is_missing():
+    missing = extract_invoice_from_text("Total: $20.00")
+    assert missing["invoice"]["invoice_number"] is None
+
+
+def test_model_cache_status_requires_readable_non_empty_files(tmp_path):
+    for filename in ("inference.yml", "inference.json", "inference.pdiparams"):
+        (tmp_path / filename).write_bytes(b"model")
+
+    assert _model_cache_status(tmp_path) == "readable"
+
+    (tmp_path / "inference.yml").write_bytes(b"")
+    assert _model_cache_status(tmp_path) == "invalid:inference.yml"
+
+
+def test_paddle_initialization_failure_logs_safe_diagnostics(caplog, tmp_path):
+    paths = {"det": tmp_path / "det", "rec": tmp_path / "rec"}
+    with caplog.at_level("ERROR", logger="services.ocr_service"):
+        error = _paddle_init_error(PermissionError("access denied"), paths)
+
+    assert error.code == "PADDLEOCR_UNAVAILABLE"
+    assert "PermissionError" in caplog.text
+    assert "access denied" in caplog.text
+    assert ocr_service.PADDLE_DET_MODEL_NAME in caplog.text
+    assert ocr_service.PADDLE_REC_MODEL_NAME in caplog.text
+    assert str(tmp_path) in caplog.text
+
+
+def test_paddle_model_initializes_only_once(monkeypatch):
+    calls = []
+
+    class FakePaddleOcr:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+
+    monkeypatch.setattr(ocr_service, "_PADDLE_OCR_MODEL", None)
+    monkeypatch.setattr(ocr_service, "_PADDLE_INIT_ERROR", None)
+    fake_paddle = SimpleNamespace(set_device=lambda _: None, set_num_threads=lambda _: None)
+    with patch.dict("sys.modules", {"paddleocr": SimpleNamespace(PaddleOCR=FakePaddleOcr), "paddle": fake_paddle}):
+        assert _get_paddle_ocr() is _get_paddle_ocr()
+
+    assert len(calls) == 1
+
+
+def test_e5_readiness_is_independent_of_paddle_failure(monkeypatch):
+    monkeypatch.setattr(ocr_service, "_MODEL_READINESS", {"paddleocr": "loading", "e5": "loading"})
+    monkeypatch.setattr(ocr_service, "_get_paddle_ocr", Mock(side_effect=ocr_service.OcrServiceError("PADDLEOCR_UNAVAILABLE", "failed", 503)))
+    monkeypatch.setattr(ocr_service, "_load_e5_model", Mock(return_value=object()))
+
+    warm_service_models()
+
+    assert ocr_service._MODEL_READINESS == {"paddleocr": "unavailable", "e5": "ready"}

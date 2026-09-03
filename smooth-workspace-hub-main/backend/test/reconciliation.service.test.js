@@ -5,11 +5,15 @@ const {
   similarity,
   jaroWinkler,
   amountScore,
+  amountDifferencePercent,
   dateScore,
   findPaymentCombination,
   score,
   buildSemanticQuery,
-  getSemanticScores
+  getSemanticScores,
+  isBroadCandidate,
+  buildReconciliationResult,
+  getReconciliationMetadata
 } = require('../src/services/reconciliation.service');
 
 test('normalizes invoice and company values', () => {
@@ -22,9 +26,36 @@ test('uses Levenshtein and Jaro-Winkler signals', () => {
 });
 test('uses Decimal-safe amount scoring and date scoring', () => {
   assert.equal(amountScore('100000.00', '100000'), 100);
-  assert.equal(amountScore('100000', '60000'), 60);
+  assert.equal(amountScore('20097', '20315'), 65);
+  assert.equal(amountScore('20097', '22000'), 20);
+  assert.equal(amountDifferencePercent('20097', '20315').toFixed(2), '1.08');
   assert.equal(dateScore(2), 100);
   assert.equal(dateScore(10), 75);
+});
+
+test('keeps a date-valid exact-reference candidate despite amount mismatch', () => {
+  const invoice = {
+    invoice_id: 'INV-2024-008743',
+    invoice_date: '2024-09-15',
+    amount: '20097.00',
+    customer_name: 'Global Retail Inc.'
+  };
+  const transaction = {
+    transaction_id: 'FSB-2024-445821',
+    transaction_date: '2024-09-18',
+    description: 'Global Retail Inc. settlement INV-2024-008743',
+    reference: 'FSB-2024-445821',
+    amount: '20315.00'
+  };
+  assert.equal(isBroadCandidate(invoice, transaction), true);
+  const scored = score(invoice, transaction, 0);
+  assert.equal(scored.referenceExact, true);
+  assert.equal(scored.scores.reference, 100);
+  assert.equal(scored.scores.name, 100);
+  assert.equal(scored.scores.date, 100);
+  assert.equal(scored.scores.amount, 65);
+  assert.ok(scored.warnings.some((warning) => warning.type === 'AMOUNT_MISMATCH'));
+  assert.equal(scored.days, 3);
 });
 test('finds bounded two and three transaction combinations', () => {
   const invoice = { amount: '100000' };
@@ -98,4 +129,33 @@ test('requests batched semantic scores and preserves order', async () => {
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+test('builds persisted-run counts from exactly one result per invoice', () => {
+  const result = buildReconciliationResult({
+    totalInvoices: 4,
+    results: [
+      { matchType: 'AUTO_MATCH' },
+      { matchType: 'MANUAL_REVIEW' },
+      { matchType: 'UNMATCHED' },
+      { matchType: 'PARTIAL_PAYMENT' }
+    ],
+    runId: 'RUN-test',
+    sessionId: 'REC-test'
+  });
+  assert.deepEqual(result.summary, {
+    autoMatched: 1,
+    manualReview: 1,
+    unmatched: 1,
+    partialPayments: 1,
+    multiTransactionMatches: 0,
+    exceptions: 0
+  });
+  assert.equal(result.totalInvoices, 4);
+});
+
+test('exposes the configured confidence weights and thresholds for run persistence', () => {
+  const metadata = getReconciliationMetadata();
+  assert.equal(Object.values(metadata.weights).reduce((sum, value) => sum + value, 0), 100);
+  assert.ok(metadata.thresholds.auto >= metadata.thresholds.review);
 });

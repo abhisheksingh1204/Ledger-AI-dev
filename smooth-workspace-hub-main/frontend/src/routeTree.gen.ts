@@ -12,6 +12,8 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as QaRouteImport } from './routes/qa'
 import { Route as ReconciliationRouteImport } from './routes/reconciliation'
+import { Route as ReconciliationHistoryRouteImport } from './routes/reconciliation/history'
+import { Route as ReconciliationHistoryRunIdRouteImport } from './routes/reconciliation/history/$runId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -28,35 +30,68 @@ const ReconciliationRoute = ReconciliationRouteImport.update({
   path: '/reconciliation',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ReconciliationHistoryRoute = ReconciliationHistoryRouteImport.update({
+  id: '/history',
+  path: '/history',
+  getParentRoute: () => ReconciliationRoute,
+} as any)
+const ReconciliationHistoryRunIdRoute =
+  ReconciliationHistoryRunIdRouteImport.update({
+    id: '/$runId',
+    path: '/$runId',
+    getParentRoute: () => ReconciliationHistoryRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/qa': typeof QaRoute
-  '/reconciliation': typeof ReconciliationRoute
+  '/reconciliation': typeof ReconciliationRouteWithChildren
+  '/reconciliation/history': typeof ReconciliationHistoryRouteWithChildren
+  '/reconciliation/history/$runId': typeof ReconciliationHistoryRunIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/qa': typeof QaRoute
-  '/reconciliation': typeof ReconciliationRoute
+  '/reconciliation': typeof ReconciliationRouteWithChildren
+  '/reconciliation/history': typeof ReconciliationHistoryRouteWithChildren
+  '/reconciliation/history/$runId': typeof ReconciliationHistoryRunIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/qa': typeof QaRoute
-  '/reconciliation': typeof ReconciliationRoute
+  '/reconciliation': typeof ReconciliationRouteWithChildren
+  '/reconciliation/history': typeof ReconciliationHistoryRouteWithChildren
+  '/reconciliation/history/$runId': typeof ReconciliationHistoryRunIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/qa' | '/reconciliation'
+  fullPaths:
+    | '/'
+    | '/qa'
+    | '/reconciliation'
+    | '/reconciliation/history'
+    | '/reconciliation/history/$runId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/qa' | '/reconciliation'
-  id: '__root__' | '/' | '/qa' | '/reconciliation'
+  to:
+    | '/'
+    | '/qa'
+    | '/reconciliation'
+    | '/reconciliation/history'
+    | '/reconciliation/history/$runId'
+  id:
+    | '__root__'
+    | '/'
+    | '/qa'
+    | '/reconciliation'
+    | '/reconciliation/history'
+    | '/reconciliation/history/$runId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   QaRoute: typeof QaRoute
-  ReconciliationRoute: typeof ReconciliationRoute
+  ReconciliationRoute: typeof ReconciliationRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -82,13 +117,52 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ReconciliationRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/reconciliation/history': {
+      id: '/reconciliation/history'
+      path: '/history'
+      fullPath: '/reconciliation/history'
+      preLoaderRoute: typeof ReconciliationHistoryRouteImport
+      parentRoute: typeof ReconciliationRoute
+    }
+    '/reconciliation/history/$runId': {
+      id: '/reconciliation/history/$runId'
+      path: '/$runId'
+      fullPath: '/reconciliation/history/$runId'
+      preLoaderRoute: typeof ReconciliationHistoryRunIdRouteImport
+      parentRoute: typeof ReconciliationHistoryRoute
+    }
   }
 }
+
+interface ReconciliationHistoryRouteChildren {
+  ReconciliationHistoryRunIdRoute: typeof ReconciliationHistoryRunIdRoute
+}
+
+const ReconciliationHistoryRouteChildren: ReconciliationHistoryRouteChildren = {
+  ReconciliationHistoryRunIdRoute: ReconciliationHistoryRunIdRoute,
+}
+
+const ReconciliationHistoryRouteWithChildren =
+  ReconciliationHistoryRoute._addFileChildren(
+    ReconciliationHistoryRouteChildren,
+  )
+
+interface ReconciliationRouteChildren {
+  ReconciliationHistoryRoute: typeof ReconciliationHistoryRouteWithChildren
+}
+
+const ReconciliationRouteChildren: ReconciliationRouteChildren = {
+  ReconciliationHistoryRoute: ReconciliationHistoryRouteWithChildren,
+}
+
+const ReconciliationRouteWithChildren = ReconciliationRoute._addFileChildren(
+  ReconciliationRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   QaRoute: QaRoute,
-  ReconciliationRoute: ReconciliationRoute,
+  ReconciliationRoute: ReconciliationRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

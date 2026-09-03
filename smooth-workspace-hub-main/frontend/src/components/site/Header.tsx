@@ -102,6 +102,9 @@ export function Header({ sections = true, active = "overview" }: HeaderProps) {
               >
                 Reconciliation
               </Link>
+              <Link to="/reconciliation/history" className={linkClass(undefined)}>
+                History
+              </Link>
               <Link to="/qa" className={linkClass(active === "qa" ? "qa" : undefined)}>
                 Q&amp;A
               </Link>
@@ -179,6 +182,9 @@ export function Header({ sections = true, active = "overview" }: HeaderProps) {
                 className="font-label-sm text-label-sm text-on-surface-variant"
               >
                 Reconciliation
+              </Link>
+              <Link to="/reconciliation/history" onClick={() => setMenuOpen(false)} className="font-label-sm text-label-sm text-on-surface-variant">
+                History
               </Link>
               <Link
                 to="/qa"

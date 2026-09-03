@@ -203,7 +203,7 @@ def parse_amount_from_line(line: str) -> Optional[str]:
 def maybe_extract_money_after_label(lines: list[str], keywords: list[str]) -> Optional[str]:
     for line in lines:
         lowered = line.lower()
-        if any(keyword in lowered for keyword in keywords):
+        if any(re.search(r"(?<![a-z0-9])" + re.escape(keyword.lower()) + r"(?![a-z0-9])", lowered) for keyword in keywords):
             amount = parse_amount_from_line(line)
             if amount:
                 return amount
