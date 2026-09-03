@@ -33,11 +33,23 @@ function isTaxQuestion(question) {
   );
 }
 
+function classifyQuestion(question) {
+  const text = String(question || '').toLowerCase();
+  if (/\b(legally|legal|law|compliance|applicable|applicability|gst rate|tds required|regulatory|rule)\b/.test(text)) return 'TAX_REGULATORY';
+  if (/\b(gst|cgst|sgst|igst|vat|tax|arithmetic|calculation|subtotal|total)\b/.test(text) && /\b(correct|calculation|arithmetic|equal|add|rate|charged|math)/.test(text)) return 'TAX_ARITHMETIC';
+  if (/\b(unmatch|match|manual review|confidence|exception|reconcil|candidate|score)/.test(text)) return 'RECONCILIATION';
+  if (/\b(payment|paid|settlement|transaction|bank|utr|reference|narration)/.test(text)) return 'PAYMENT';
+  if (/\b(history|previous|before|earlier|version|recheck)/.test(text)) return 'HISTORY';
+  if (/\b(total|amount|invoice number|invoice no|customer|vendor|seller|due date|invoice date|tax amount|subtotal|currency)/.test(text)) return 'INVOICE_FACT';
+  return 'GENERAL';
+}
+
 function taxValidation(invoice = {}, extracted = {}) {
   const tax = extracted.invoice || extracted;
   const subtotal = money(invoice.subtotal || tax.subtotal);
   const total = money(invoice.amount || tax.total_amount || tax.grand_total);
   const actualTax = money(invoice.tax_amount || tax.tax_amount);
+  const shipping = money(tax.shipping || tax.shipping_amount || tax.freight || 0) || new Decimal(0);
 
   if (!subtotal || !total || !actualTax) {
     return {
@@ -46,7 +58,7 @@ function taxValidation(invoice = {}, extracted = {}) {
     };
   }
 
-  const expectedTotal = subtotal.plus(actualTax);
+  const expectedTotal = subtotal.plus(actualTax).plus(shipping);
   const status = expectedTotal.eq(total) ? 'VALID' : 'INVALID';
 
   return {
@@ -55,10 +67,78 @@ function taxValidation(invoice = {}, extracted = {}) {
     subtotal: subtotal.toFixed(2),
     actual_tax: actualTax.toFixed(2),
     expected_tax: actualTax.toFixed(2),
+    shipping: shipping.toFixed(2),
     actual_total: total.toFixed(2),
     expected_total: expectedTotal.toFixed(2),
     grandTotal: total.toFixed(2)
   };
+}
+
+function taxKind(invoice = {}, document) {
+  const extracted = document?.extracted_data?.invoice || {};
+  if (extracted.gst || extracted.gst_amount || extracted.cgst || extracted.sgst || extracted.igst || invoice.gstin || invoice.seller_gstin || invoice.customer_gstin) return 'GST';
+  if (extracted.vat || extracted.vat_amount) return 'VAT';
+  return invoice.tax_amount || extracted.tax_amount ? 'GENERIC_TAX' : 'NONE';
+}
+
+function deterministicFactAnswer(question, invoice, validation) {
+  const text = String(question || '').toLowerCase();
+  const safe = normalizeSafeInvoice(invoice);
+  if (/\b(customer|vendor|seller)\b/.test(text)) return `The customer is ${safe.customerName || 'not available in the invoice data'}.`;
+  if (/\b(invoice number|invoice no)\b/.test(text)) return `The invoice number is ${safe.invoiceNumber || 'not available in the invoice data'}.`;
+  if (/\bdue date\b/.test(text)) return `The due date is ${safe.dueDate || 'not available in the invoice data'}.`;
+  if (/\binvoice date\b/.test(text)) return `The invoice date is ${safe.invoiceDate || 'not available in the invoice data'}.`;
+  if (/\btax amount\b/.test(text)) return `The tax amount is ${safe.taxAmount || 'not available in the invoice data'}${safe.currency ? ` ${safe.currency}` : ''}.`;
+  if (/\bsubtotal\b/.test(text)) return `The subtotal is ${safe.subtotal || 'not available in the invoice data'}${safe.currency ? ` ${safe.currency}` : ''}.`;
+  return `The total invoice amount is ${safe.amount || 'not available in the invoice data'}${safe.currency ? ` ${safe.currency}` : ''}.`;
+}
+
+function deterministicTaxAnswer(question, invoice, document, validation) {
+  const kind = taxKind(invoice, document);
+  if (validation.status === 'INSUFFICIENT_DATA') return { answer: 'I cannot verify the invoice arithmetic because subtotal, tax, and total are not all available.', kind };
+  const expression = `${validation.subtotal} + ${validation.actual_tax} + ${validation.shipping} = ${validation.expected_total}`;
+  const arithmetic = validation.status === 'VALID' ? 'The invoice arithmetic is mathematically correct.' : `The invoice arithmetic does not balance: the calculated total is ${validation.expected_total}, but the invoice total is ${validation.actual_total}.`;
+  const label = kind === 'GST' ? 'GST-specific fields are present.' : kind === 'VAT' ? 'The invoice contains VAT fields.' : 'This invoice does not contain GST-specific fields; it contains a generic tax amount.';
+  return { answer: `${label}\n\n${arithmetic}\n\nSubtotal + Tax + Shipping: ${expression}.`, kind };
+}
+
+function deterministicReconciliationAnswer(context) {
+  const match = context.reconciliationSummary;
+  if (!match) return 'This invoice has not been reconciled yet, so there is no match status available.';
+  const status = match.match_type || match.status || 'UNKNOWN';
+  const lines = [`The authoritative reconciliation status is ${status} with ${Number(match.confidence_score || 0).toFixed(2)}% confidence.`];
+  const candidate = match.best_candidate || match.transaction_snapshot;
+  if (candidate) {
+    const amount = candidate.amount ?? candidate.transaction_amount;
+    lines.push('', `Best candidate: ${candidate.transaction_id || candidate.transactionId || 'not available'}`);
+    lines.push(`Invoice amount: ${formatMoney(context.invoice.amount) || 'not available'}`);
+    lines.push(`Settlement amount: ${formatMoney(amount) || 'not available'}`);
+    if (context.invoice.amount != null && amount != null) lines.push(`Difference: ${formatMoney(new Decimal(context.invoice.amount).minus(amount).abs())}`);
+    lines.push(`Reference score: ${match.reference_score ?? 'not available'}%`, `Customer/name score: ${match.name_score ?? 'not available'}%`, `Date score: ${match.date_score ?? 'not available'}%`);
+  }
+  if (match.amount_score != null) lines.push(`Amount score: ${match.amount_score}%`);
+  if (match.semantic_score != null) lines.push(`Semantic score: ${match.semantic_score}%`);
+  const warnings = match.reason?.warnings || [];
+  const exceptions = context.exceptions.map((item) => item.exception_type).filter(Boolean);
+  if (exceptions.length || warnings.length) lines.push('', `Exceptions: ${Array.from(new Set([...exceptions, ...warnings.map((item) => item.type)])).join(', ')}`);
+  if (match.reason?.summary) lines.push('', `Reason: ${match.reason.summary}`);
+  return lines.join('\n');
+}
+
+function deterministicConfidenceAnswer(context) {
+  const match = context.reconciliationSummary;
+  if (!match) return 'This invoice has not been reconciled yet, so no confidence score is available.';
+  return [`Final confidence: ${Number(match.confidence_score || 0).toFixed(2)}%`, `Amount: ${match.amount_score ?? '-'}%`, `Reference: ${match.reference_score ?? '-'}%`, `Name: ${match.name_score ?? '-'}%`, `Semantic: ${match.semantic_score ?? '-'}%`, `Date: ${match.date_score ?? '-'}%`, 'The score is the weighted combination of these deterministic signals.'].join('\n');
+}
+
+function deterministicFallbackAnswer(question, context) {
+  const category = classifyQuestion(question);
+  if (category === 'RECONCILIATION' || category === 'HISTORY') return deterministicReconciliationAnswer(context);
+  if (category === 'INVOICE_FACT') return deterministicFactAnswer(question, context.invoice);
+  if (category === 'TAX_ARITHMETIC') return deterministicTaxAnswer(question, context.invoice, context.document, buildInvoiceCheckSummary(context.invoice, context.document)).answer;
+  const transaction = context.transactions[0];
+  if (category === 'PAYMENT' && transaction) return `The relevant transaction is ${transaction.transaction_id || 'not available'} for ${formatMoney(transaction.amount) || 'an unavailable amount'} on ${transaction.transaction_date || 'an unavailable date'}.`;
+  return 'I could not generate an extended explanation, but the selected invoice facts remain available in this response.';
 }
 
 function mask(value) {
@@ -137,7 +217,9 @@ async function getInvoiceContext(invoiceId, userId) {
         name_score: matches[0].name_score,
         semantic_score: matches[0].semantic_score,
         date_score: matches[0].date_score,
-        reason: matches[0].reason
+        reason: matches[0].reason,
+        best_candidate: matches[0].best_candidate || matches[0].transaction_snapshot || null,
+        transaction_snapshot: matches[0].transaction_snapshot || null
       }
     : null;
 
@@ -161,7 +243,8 @@ function safeContext(context) {
       semantic_score: match.semantic_score,
       date_score: match.date_score,
       amount_difference: match.amount_difference,
-      reason: match.reason
+      reason: match.reason,
+      best_candidate: match.best_candidate || match.transaction_snapshot || null
     })),
     exceptions: exceptions.map((exception) => ({
       exception_type: exception.exception_type,
@@ -261,13 +344,15 @@ function normalizeAnswerPayload(answer, fallback) {
 
 async function askInvoice({ invoiceId, userId, question, conversationId }) {
   const context = await getInvoiceContext(invoiceId, userId);
+  const questionType = classifyQuestion(question);
   const validation = buildInvoiceCheckSummary(context.invoice, context.document);
-  const taxKnowledge = await buildTaxKnowledgeContext({
-    invoice: context.invoice,
-    document: context.document,
-    question,
-    dbClient: db
-  });
+  let taxKnowledge = { status: 'NOT_REQUIRED', jurisdiction: null, sources: [], citations: [], chunks: [] };
+  if (questionType === 'TAX_REGULATORY') {
+    taxKnowledge = await buildTaxKnowledgeContext({ invoice: context.invoice, document: context.document, question, dbClient: db });
+  }
+
+  const safeId = context.invoice.invoice_id || invoiceId;
+  console.info('QA request invoice=%s question_type=%s invoice_loaded=%s reconciliation_loaded=%s exceptions_loaded=%s rag_required=%s', safeId, questionType, true, Boolean(context.reconciliationSummary), context.exceptions.length > 0, questionType === 'TAX_REGULATORY');
 
   let conversation = conversationId
     ? await db('ai_conversations')
@@ -317,17 +402,35 @@ async function askInvoice({ invoiceId, userId, question, conversationId }) {
   ];
 
   let answer;
-  try {
-    answer = await groq(messages);
-  } catch (error) {
-    answer = {
-      answer:
-        isTaxQuestion(question) && taxKnowledge.status === 'AUTHORITATIVE_SOURCE_NOT_FOUND'
-          ? 'AUTHORITATIVE_SOURCE_NOT_FOUND'
-          : 'Unable to generate a grounded answer right now.',
-      confidence: 'LOW',
-      requiresProfessionalReview: true
-    };
+  let answerType = 'AI_EXPLANATION';
+  let grounded = true;
+  let limitations = [];
+  if (questionType === 'INVOICE_FACT') {
+    answer = { answer: deterministicFactAnswer(question, context.invoice, validation), answerType: 'DETERMINISTIC' };
+  } else if (questionType === 'RECONCILIATION' || /confidence score/i.test(question)) {
+    answer = { answer: /confidence/i.test(question) ? deterministicConfidenceAnswer(context) : deterministicReconciliationAnswer(context), answerType: 'DETERMINISTIC' };
+  } else if (questionType === 'TAX_ARITHMETIC') {
+    const deterministic = deterministicTaxAnswer(question, context.invoice, context.document, validation);
+    answer = { answer: deterministic.answer, answerType: 'DETERMINISTIC' };
+  } else if (questionType === 'TAX_REGULATORY' && taxKnowledge.status !== 'GROUNDING_AVAILABLE') {
+    answer = { answer: `I can verify the arithmetic, but I cannot confirm the legal applicability of this tax rate from the available authoritative sources.`, answerType: 'DETERMINISTIC' };
+    limitations = ['Authoritative tax evidence was unavailable.'];
+    grounded = false;
+  } else {
+    try {
+      answer = await groq(messages);
+      answerType = questionType === 'TAX_REGULATORY' ? 'RAG_GROUNDED' : 'AI_EXPLANATION';
+      console.info('QA request invoice=%s groq_called=true groq_status=success fallback_reason=none', safeId);
+    } catch (error) {
+      console.warn('QA request invoice=%s groq_called=true groq_status=failed fallback_reason=%s', safeId, error.code || 'GROQ_FAILURE');
+      answer = {
+        answer: questionType === 'TAX_REGULATORY'
+          ? 'The authoritative tax context was retrieved, but the extended explanation service is temporarily unavailable. Review the attached authoritative sources for the legal guidance.'
+          : deterministicFallbackAnswer(question, context),
+        answerType: questionType === 'TAX_REGULATORY' ? 'RAG_GROUNDED' : 'DETERMINISTIC'
+      };
+      limitations = ['Extended AI explanation is temporarily unavailable.'];
+    }
   }
 
   const normalized = normalizeAnswerPayload(answer, {
@@ -342,6 +445,11 @@ async function askInvoice({ invoiceId, userId, question, conversationId }) {
     requiresProfessionalReview:
       taxKnowledge.status !== 'GROUNDING_AVAILABLE' || validation.status !== 'VALID'
   });
+  normalized.answerType = answer.answerType || answer_type(answerType);
+  normalized.grounded = grounded;
+  normalized.facts = safeContext(context).invoice;
+  normalized.reconciliation = safeContext(context).reconciliation;
+  normalized.limitations = limitations;
 
   await db('ai_messages').insert([
     { conversation_id: conversation.id, role: 'user', content: question },
@@ -359,6 +467,10 @@ async function askInvoice({ invoiceId, userId, question, conversationId }) {
     sources: normalized.sources || taxKnowledge.sources,
     conversationId: conversation.conversation_id
   };
+}
+
+function answer_type(value) {
+  return value === 'RAG_GROUNDED' ? 'RAG_GROUNDED' : value === 'DETERMINISTIC' ? 'DETERMINISTIC' : 'AI_EXPLANATION';
 }
 
 async function analyzeReconciliation({ invoiceId, userId, question }) {
@@ -385,6 +497,12 @@ module.exports = {
   getInvoiceContext,
   groq,
   isTaxQuestion,
+  classifyQuestion,
+  deterministicFactAnswer,
+  deterministicTaxAnswer,
+  deterministicReconciliationAnswer,
+  deterministicConfidenceAnswer,
+  deterministicFallbackAnswer,
   money,
   normalizeSafeInvoice,
   safeContext,

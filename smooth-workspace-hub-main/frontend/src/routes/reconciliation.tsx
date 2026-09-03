@@ -1,4 +1,4 @@
-import { Link, createFileRoute } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useLocation } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 import { useState } from "react";
 
@@ -56,6 +56,11 @@ function statusLabel(value: string) {
 }
 
 function ReconciliationPage() {
+  const location = useLocation();
+  if (location.pathname === "/reconciliation/history" || location.pathname.startsWith("/reconciliation/history/")) {
+    return <Outlet />;
+  }
+
   const [invoice, setInvoice] = useState<File | null>(null);
   const [bankStatement, setBankStatement] = useState<File | null>(null);
   const [phase, setPhase] = useState<"upload" | "running" | "results">("upload");

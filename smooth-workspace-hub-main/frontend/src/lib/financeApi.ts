@@ -203,12 +203,23 @@ export async function askInvoice(invoiceId: string, question: string, conversati
   return request<{
     success: true;
     answer: string;
+    answerType?: "DETERMINISTIC" | "AI_EXPLANATION" | "RAG_GROUNDED";
+    grounded?: boolean;
+    facts?: Record<string, unknown>;
+    reconciliation?: Record<string, unknown> | null;
+    limitations?: string[];
     sources?: SourceCitation[];
     conversationId?: string;
   }>(`/api/ai/invoice/${encodeURIComponent(invoiceId)}/question`, {
     method: "POST",
     body: JSON.stringify({ question, conversationId }),
   });
+}
+
+export async function uploadQaInvoice(invoice: File) {
+  const body = new FormData();
+  body.append("invoice", invoice);
+  return request<{ success: true; data: { sessionId: string; document_id: string; invoice_id: string; processing_status: string } }>("/api/ai/invoices/upload", { method: "POST", body });
 }
 
 export async function getInvoices() {
@@ -227,6 +238,7 @@ export type HistoryRun = {
   exceptions: number;
   match_rate: number;
   average_confidence: number;
+  processing_time_ms?: number | null;
 };
 
 export type HistoricalRun = {
@@ -241,7 +253,11 @@ export type HistoricalRun = {
 export async function getReconciliationHistory(params: { page?: number; limit?: number; from?: string; to?: string; status?: string } = {}) {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => { if (value != null && value !== "") query.set(key, String(value)); });
-  return request<{ success: true; data: { runs: HistoryRun[]; page: number; limit: number } }>(`/api/reconciliation/history${query.toString() ? `?${query}` : ""}`);
+  const response = await request<{ success: true; data: { runs: HistoryRun[]; page: number; limit: number } }>(`/api/reconciliation/history${query.toString() ? `?${query}` : ""}`);
+  if (!response.data || !Array.isArray(response.data.runs)) {
+    throw new Error("History response is malformed: runs were not returned by the backend.");
+  }
+  return response;
 }
 
 export async function getHistoricalRun(runId: string) {

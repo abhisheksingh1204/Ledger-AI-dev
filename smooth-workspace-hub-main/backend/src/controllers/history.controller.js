@@ -122,7 +122,7 @@ const list = asyncHandler(async (req, res) => {
     run_id: run.run_id, session_id: run.session_display_id || run.session_id, version: Number(run.version || 1), created_at: run.started_at,
     total_invoices: Number(run.total_invoices || 0), auto_matched: Number(run.auto_matched_count || 0),
     manual_review: Number(run.manual_review_count || 0), unmatched: Number(run.unmatched_count || 0),
-    exceptions: Number(run.exception_count || 0), match_rate: Number(run.match_rate || 0), average_confidence: Number(run.average_confidence || 0)
+    exceptions: Number(run.exception_count || 0), match_rate: Number(run.match_rate || 0), average_confidence: Number(run.average_confidence || 0), processing_time_ms: run.processing_time_ms == null ? null : Number(run.processing_time_ms)
   })), page, limit } });
 });
 

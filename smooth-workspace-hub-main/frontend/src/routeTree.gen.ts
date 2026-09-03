@@ -12,8 +12,8 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as QaRouteImport } from './routes/qa'
 import { Route as ReconciliationRouteImport } from './routes/reconciliation'
-import { Route as ReconciliationHistoryRouteImport } from './routes/reconciliation/history'
-import { Route as ReconciliationHistoryRunIdRouteImport } from './routes/reconciliation/history/$runId'
+import { Route as ReconciliationHistoryRouteImport } from './routes/reconciliation.history'
+import { Route as ReconciliationHistoryRunIdRouteImport } from './routes/reconciliation.history.$runId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',

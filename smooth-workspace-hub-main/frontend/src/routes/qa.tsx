@@ -6,11 +6,11 @@ import { WorkspaceBackground } from "@/components/site/BackgroundLayer";
 import { Footer } from "@/components/site/Footer";
 import { Header } from "@/components/site/Header";
 import { EASE_PREMIUM } from "@/lib/site";
-import { askInvoice, getInvoices, type InvoiceReport, type SourceCitation } from "@/lib/financeApi";
+import { askInvoice, getInvoices, uploadQaInvoice, type InvoiceReport, type SourceCitation } from "@/lib/financeApi";
 
 export const Route = createFileRoute("/qa")({ component: QAPage });
 
-type Message = { role: "user" | "ai"; text: string; sources?: SourceCitation[] };
+type Message = { role: "user" | "ai"; text: string; sources?: SourceCitation[]; answerType?: string; limitations?: string[] };
 
 function QAPage() {
   const [invoices, setInvoices] = useState<InvoiceReport[]>([]);
@@ -20,6 +20,10 @@ function QAPage() {
   const [thinking, setThinking] = useState(false);
   const [error, setError] = useState("");
   const [conversationId, setConversationId] = useState<string>();
+  const [source, setSource] = useState<"select" | "upload">("select");
+  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
+  const [processing, setProcessing] = useState(false);
+  const [search, setSearch] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,12 +31,30 @@ function QAPage() {
       .then((response) => {
         const items = response.data.items || [];
         setInvoices(items);
-        if (items[0]?.invoiceId) setInvoiceId(String(items[0].invoiceId));
       })
       .catch((requestError) =>
         setError(requestError instanceof Error ? requestError.message : "Could not load invoices."),
       );
   }, []);
+  const processInvoice = async () => {
+    if (!invoiceFile || processing) return;
+    setError("");
+    setProcessing(true);
+    try {
+      const uploaded = await uploadQaInvoice(invoiceFile);
+      const response = await getInvoices();
+      setInvoices(response.data.items || []);
+      setInvoiceId(uploaded.data.invoice_id);
+      setMessages([]);
+      setConversationId(undefined);
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : "Invoice processing failed.");
+    } finally {
+      setProcessing(false);
+    }
+  };
+  const visibleInvoices = invoices.filter((invoice) => `${invoice.invoiceNumber || invoice.invoiceId} ${invoice.customerName || ""}`.toLowerCase().includes(search.toLowerCase()));
+  const selectedInvoice = invoices.find((invoice) => String(invoice.invoiceId) === invoiceId);
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, thinking]);
@@ -52,6 +74,8 @@ function QAPage() {
         {
           role: "ai",
           text: response.answer,
+          answerType: response.answerType,
+          limitations: response.limitations,
           ...(response.sources ? { sources: response.sources } : {}),
         },
       ]);
@@ -74,12 +98,28 @@ function QAPage() {
       >
         <div className="mb-12">
           <h1 className="font-display-lg-mobile md:font-display-lg text-primary mb-4">
-            Document Intelligence
+            Invoice Q&A Agent
           </h1>
           <p className="text-body-lg text-on-surface-variant max-w-2xl">
-            Ask grounded questions about invoices, reconciliation results and Indian tax guidance.
+            Upload or select an invoice, then ask questions about its amounts, payment status, reconciliation and tax details.
           </p>
         </div>
+        <section className="glass-panel-solid rounded-2xl p-6 mb-8">
+          <div className="flex flex-wrap gap-2 mb-5">
+            {([["select", "Select Existing Invoice"], ["upload", "Upload Invoice"]] as const).map(([value, label]) => (
+              <button key={value} type="button" onClick={() => setSource(value)} className={`px-4 py-2 rounded-full border text-sm ${source === value ? "bg-secondary text-on-secondary" : "border-outline-variant text-on-surface-variant"}`}>{label}</button>
+            ))}
+          </div>
+          {source === "upload" ? (
+            <div className="flex flex-wrap items-center gap-4">
+              <label className="px-4 py-3 rounded-lg border border-outline-variant text-sm text-on-surface-variant cursor-pointer">{invoiceFile ? `${invoiceFile.name} (${(invoiceFile.size / 1024 / 1024).toFixed(2)} MB)` : "Select File"}<input className="hidden" type="file" accept="application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg" onChange={(event) => setInvoiceFile(event.target.files?.[0] || null)} /></label>
+              <button type="button" onClick={() => void processInvoice()} disabled={!invoiceFile || processing} className="bg-secondary text-on-secondary px-5 py-3 rounded-button disabled:opacity-50">{processing ? "Processing invoice..." : "Process Invoice"}</button>
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-3"><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search invoice number or customer" className="flex-1 min-w-[240px] bg-surface border border-outline-variant rounded-lg p-3" />{visibleInvoices.map((item) => <button key={String(item.invoiceId)} type="button" onClick={() => { setInvoiceId(String(item.invoiceId)); setMessages([]); setConversationId(undefined); }} className={`text-left px-4 py-3 rounded-xl border ${invoiceId === String(item.invoiceId) ? "border-secondary bg-secondary/10" : "border-outline-variant"}`}><strong>{String(item.invoiceNumber || item.invoiceId)}</strong><span className="block text-xs text-on-surface-variant">{item.customerName || "Unknown customer"} · {item.amount || "-"}</span></button>)}</div>
+          )}
+        </section>
+        {selectedInvoice ? <section className="glass-panel-solid rounded-2xl p-5 mb-8 flex flex-wrap items-center justify-between gap-4"><div><p className="text-xs uppercase text-on-surface-variant">Selected Invoice</p><h2 className="text-xl text-primary mt-1">{String(selectedInvoice.invoiceNumber || selectedInvoice.invoiceId)}</h2><p className="text-sm text-on-surface-variant">{selectedInvoice.customerName || "-"} · {selectedInvoice.amount || "-"} · {selectedInvoice.invoiceDate || "-"}</p></div><button type="button" onClick={() => { setInvoiceId(""); setMessages([]); setConversationId(undefined); }} className="text-secondary hover:underline">Change Invoice</button></section> : <p className="text-center text-on-surface-variant mb-8">Select or upload an invoice to start asking questions.</p>}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-gutter items-start">
           <section className="lg:col-span-5 glass-panel-solid rounded-[24px] flex flex-col h-[650px] overflow-hidden">
             <div className="p-6 border-b border-outline-variant/20">
@@ -127,8 +167,10 @@ function QAPage() {
                         ? "bg-surface-container-high p-4 rounded-2xl"
                         : "bg-surface p-4 rounded-2xl border border-outline-variant/30"
                     }
-                  >
+                    >
+                    {message.role === "ai" && message.answerType ? <p className="text-[10px] uppercase tracking-wide text-secondary mb-2">{message.answerType.replaceAll("_", " ")}</p> : null}
                     <p className="text-body-md whitespace-pre-wrap">{message.text}</p>
+                    {message.limitations?.length ? <p className="mt-3 text-xs text-on-surface-variant">{message.limitations.join(" ")}</p> : null}
                     {message.sources?.length ? (
                       <div className="mt-4 border-t border-outline-variant/30 pt-3">
                         <p className="text-xs font-semibold uppercase text-on-surface-variant mb-2">

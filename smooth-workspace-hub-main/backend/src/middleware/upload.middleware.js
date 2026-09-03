@@ -38,5 +38,6 @@ const uploadReconciliationDocuments = upload.fields([
 
 module.exports = {
   MAX_FILE_SIZE_BYTES,
-  uploadReconciliationDocuments
+  uploadReconciliationDocuments,
+  uploadInvoice: upload.single('invoice')
 };

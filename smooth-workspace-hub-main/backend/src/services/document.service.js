@@ -236,6 +236,30 @@ async function persistUploadedDocuments({
   });
 }
 
+async function persistUploadedInvoiceDocument({ session, userId, invoiceUpload, invoiceFile }) {
+  return db.transaction(async (trx) => {
+    const documentData = mapCloudinaryResultToDocumentData({
+      uploadResult: invoiceUpload,
+      documentType: 'INVOICE',
+      userId,
+      sessionDbId: session.id,
+      originalFilename: invoiceFile.originalname,
+      mimeType: invoiceFile.mimetype,
+      fileSize: invoiceFile.size
+    });
+    const [document] = await trx('documents').insert(documentData).returning('*');
+    const [updatedSession] = await trx('reconciliation_sessions')
+      .where({ id: session.id, user_id: userId })
+      .update({ status: 'UPLOADED', updated_at: trx.fn.now() }, '*');
+    if (!updatedSession) throw new AppError('SESSION_NOT_FOUND', 'Reconciliation session was not found.', 404);
+    await insertAuditLog({
+      action: 'DOCUMENT_UPLOADED', tableName: 'documents', recordId: document.id, userId,
+      newValue: { documentId: document.document_id, documentType: document.document_type, filename: document.original_filename }
+    }, trx);
+    return { session: updatedSession, document };
+  });
+}
+
 async function getSessionWithDocuments(sessionId, userId) {
   if (!isValidSessionId(sessionId)) {
     throw new AppError('INVALID_SESSION_ID', 'Session ID format is invalid.', 400);
@@ -347,6 +371,7 @@ module.exports = {
   markSessionFailed,
   mapCloudinaryResultToDocumentData,
   persistUploadedDocuments,
+  persistUploadedInvoiceDocument,
   requireSessionForUser,
   storeDocumentExtraction,
   updateDocumentProcessingStatus,
