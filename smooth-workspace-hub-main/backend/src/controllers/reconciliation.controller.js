@@ -29,7 +29,8 @@ function toSafeDocumentResponse(document) {
 
 const createSession = asyncHandler(async (req, res) => {
   const userId = req.currentUserId;
-  const session = await createReconciliationSession({ userId });
+  const mode = String(req.body?.mode || req.query?.mode || 'SINGLE').toUpperCase() === 'BATCH' ? 'BATCH' : 'SINGLE';
+  const session = await createReconciliationSession({ userId, mode });
 
   return res.status(201).json({
     success: true,
@@ -37,6 +38,7 @@ const createSession = asyncHandler(async (req, res) => {
       id: session.id,
       sessionId: session.session_id,
       status: session.status
+      ,mode: session.mode
     }
   });
 });

@@ -6,7 +6,7 @@ import { useLaunchAgent } from "./LaunchProvider";
 type HeaderProps = {
   /** Landing page hash-section navigation; omitted inside workspaces. */
   sections?: boolean;
-  active?: "overview" | "reconciliation" | "qa";
+  active?: "overview" | "reconciliation" | "qa" | "forecast";
 };
 
 function scrollToSection(id: string) {
@@ -108,6 +108,9 @@ export function Header({ sections = true, active = "overview" }: HeaderProps) {
               <Link to="/qa" className={linkClass(active === "qa" ? "qa" : undefined)}>
                 Q&amp;A
               </Link>
+              <Link to="/cash-forecast" className={linkClass(active === "forecast" ? "forecast" : undefined)}>
+                Cash Forecast
+              </Link>
             </>
           )}
         </nav>
@@ -192,6 +195,9 @@ export function Header({ sections = true, active = "overview" }: HeaderProps) {
                 className="font-label-sm text-label-sm text-on-surface-variant"
               >
                 Q&amp;A
+              </Link>
+              <Link to="/cash-forecast" onClick={() => setMenuOpen(false)} className="font-label-sm text-label-sm text-on-surface-variant">
+                Cash Forecast
               </Link>
             </>
           )}

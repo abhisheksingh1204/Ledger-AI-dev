@@ -4,6 +4,7 @@ const { requireUser } = require('../middleware/user.middleware');
 const { run, invoiceDetail, sessionExceptions } = require('../controllers/matching.controller');
 const { list: history, detail: historyDetail, sessionHistory, recheck, compare } = require('../controllers/history.controller');
 const { uploadReconciliationDocuments } = require('../middleware/upload.middleware');
+const { approve, reject } = require('../controllers/manualReview.controller');
 
 const router = express.Router();
 
@@ -12,6 +13,8 @@ router.get('/history', requireUser, history);
 router.get('/history/compare', requireUser, compare);
 router.get('/history/:runId', requireUser, historyDetail);
 router.post('/history/:runId/recheck', requireUser, recheck);
+router.post('/matches/:matchId/approve', requireUser, approve);
+router.post('/matches/:matchId/reject', requireUser, reject);
 router.get('/invoice/:invoiceId', requireUser, invoiceDetail);
 router.get('/:sessionId/exceptions', requireUser, sessionExceptions);
 router.get('/:sessionId/history', requireUser, sessionHistory);

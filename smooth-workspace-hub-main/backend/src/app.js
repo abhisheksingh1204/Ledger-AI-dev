@@ -9,6 +9,9 @@ const processingRoutes = require('./routes/processing.routes');
 const aiRoutes = require('./routes/ai.routes');
 const reportingRoutes = require('./routes/reporting.routes');
 const knowledgeRoutes = require('./routes/knowledge.routes');
+const forecastRoutes = require('./routes/forecast.routes');
+const taxRoutes = require('./routes/tax.routes');
+const batchReconciliationRoutes = require('./routes/batch-reconciliation.routes');
 const errorMiddleware = require('./middleware/error.middleware');
 
 const app = express();
@@ -49,6 +52,9 @@ app.use('/api/v1', processingRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/reports', reportingRoutes);
 app.use('/api/knowledge', knowledgeRoutes);
+app.use('/api/forecast', forecastRoutes);
+app.use('/api/tax', taxRoutes);
+app.use('/api/reconciliation/batch', batchReconciliationRoutes);
 
 app.use((req, res, next) => {
   next(new AppError('NOT_FOUND', 'Route not found.', 404));

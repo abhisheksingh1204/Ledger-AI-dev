@@ -6,6 +6,7 @@ const {
   buildTaxKnowledgeContext,
   inferJurisdictionFromInvoice
 } = require('./knowledge.service');
+const { validateTax: validateTaxReport } = require('./taxValidation.service');
 
 const SYSTEM_PROMPT = [
   'You are the AI Finance Controller.',
@@ -263,7 +264,18 @@ function safeContext(context) {
 }
 
 function buildInvoiceCheckSummary(invoice, document) {
-  const validation = taxValidation(invoice, document?.extracted_data || {});
+  const report = validateTaxReport(invoice, document);
+  const validation = {
+    ...report,
+    status: report.validation_status,
+    arithmeticStatus: report.validation_status,
+    actual_tax: report.arithmetic?.actual_tax || report.total_tax,
+    expected_tax: report.arithmetic?.expected_tax || report.total_tax,
+    shipping: report.shipping,
+    expected_total: report.arithmetic?.expected_total,
+    actual_total: report.arithmetic?.actual_total,
+    grandTotal: report.grand_total
+  };
   const jurisdiction = inferJurisdictionFromInvoice(invoice, document);
 
   return {

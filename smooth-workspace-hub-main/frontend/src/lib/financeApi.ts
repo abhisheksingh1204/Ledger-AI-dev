@@ -117,6 +117,36 @@ export async function createSession() {
   );
 }
 
+export async function createBatchSession() {
+  return request<{ success: true; session: { sessionId: string; mode: string; status: string } }>('/api/reconciliation/batch/sessions', { method: 'POST' });
+}
+
+export async function uploadBatchDocuments(sessionId: string, invoices: File[], bankStatement: File) {
+  const body = new FormData();
+  invoices.forEach((file) => body.append('invoices', file));
+  body.append('bankStatement', bankStatement);
+  return request<{ success: true; data: { sessionId: string; invoiceCount: number; bankCount: number } }>(`/api/reconciliation/batch/${encodeURIComponent(sessionId)}/documents`, { method: 'POST', body });
+}
+
+export type BatchStatus = {
+  sessionId: string;
+  status: string;
+  current_stage: string;
+  total_documents: number;
+  uploaded_documents: number;
+  processing_total: number;
+  processing_completed: number;
+  processing_failed: number;
+  remaining: number;
+};
+
+export async function getBatchStatus(sessionId: string) {
+  return request<{ success: true; data: BatchStatus }>(
+    `/api/reconciliation/batch/${encodeURIComponent(sessionId)}/status`,
+    { method: "GET" },
+  );
+}
+
 export async function uploadDocuments(sessionId: string, invoice: File, bankStatement: File) {
   const body = new FormData();
   body.append("invoice", invoice);
@@ -132,7 +162,7 @@ export async function processSession(sessionId: string) {
     success: true;
     data: {
       sessionId: string;
-      results: Array<{ documentId: string; success: boolean; error?: { message: string } }>;
+      results: Array<{ documentId: string; documentType?: string; success: boolean; error?: { message: string } }>;
     };
   }>(`/api/v1/process-session/${encodeURIComponent(sessionId)}`, { method: "POST" });
 }
@@ -226,6 +256,61 @@ export async function getInvoices() {
   return request<{ success: true; data: { items: InvoiceReport[] } }>("/api/reports/invoices");
 }
 
+export type TaxValidation = {
+  invoice: Record<string, unknown>;
+  tax_type: string;
+  validation_status: "VALID" | "INVALID" | "INSUFFICIENT_DATA";
+  subtotal: string | null;
+  shipping: string | null;
+  discount: string | null;
+  other_charges: string | null;
+  taxable_amount: string | null;
+  total_tax: string | null;
+  grand_total: string | null;
+  tax_lines: Array<{ type: string; rate: string | null; amount: string | null; taxable_amount: string | null }>;
+  arithmetic: Record<string, string | null> | null;
+  checks: Array<{ name: string; status: string; expected: string | null; actual: string | null; difference?: string | null; why?: string }>;
+  exceptions: Array<{ exception_type: string; severity: string; description: string }>;
+};
+
+export async function getTaxValidation(invoiceId: string) {
+  return request<{ success: true; data: TaxValidation }>(`/api/tax/invoice/${encodeURIComponent(invoiceId)}`);
+}
+
+export type CashForecast = {
+  generated_at: string;
+  currency: string;
+  summary?: { outstanding_total: string; expected: string; at_risk: string; overdue: string };
+  cumulative?: { within_7_days: string; within_30_days: string; within_60_days: string };
+  buckets?: { days_0_7: string; days_8_30: string; days_31_60: string; beyond_60_days: string };
+  currencies: Record<
+    string,
+    {
+      summary: { outstanding_total: string; expected: string; at_risk: string; overdue: string };
+      cumulative: { within_7_days: string; within_30_days: string; within_60_days: string };
+      buckets: { days_0_7: string; days_8_30: string; days_31_60: string; beyond_60_days: string };
+    }
+  >;
+  invoices: Array<
+    Record<string, string | number | null | string[] | { [key: string]: string | number | null }>
+  >;
+  customer_behavior: Array<{
+    customer: string;
+    currency?: string;
+    avg_delay_days: number;
+    median_delay_days: number;
+    late_payment_rate: number;
+    paid_invoice_count: number;
+    outstanding: string;
+  }>;
+};
+
+export async function getCashForecast(params: { from?: string; to?: string; customer?: string; currency?: string } = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => { if (value) query.set(key, value); });
+  return request<{ success: true; data: CashForecast }>(`/api/forecast/cash${query.toString() ? `?${query}` : ""}`, { cache: "no-store" });
+}
+
 export type HistoryRun = {
   run_id: string;
   session_id: string;
@@ -239,6 +324,7 @@ export type HistoryRun = {
   match_rate: number;
   average_confidence: number;
   processing_time_ms?: number | null;
+  mode?: string;
 };
 
 export type HistoricalRun = {

@@ -1,0 +1,270 @@
+{
+  "BENCH-INV-001": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-001"
+    ]
+  },
+  "BENCH-INV-002": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-002"
+    ]
+  },
+  "BENCH-INV-003": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-003"
+    ]
+  },
+  "BENCH-INV-004": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-004"
+    ]
+  },
+  "BENCH-INV-005": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-005"
+    ]
+  },
+  "BENCH-INV-006": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-006"
+    ]
+  },
+  "BENCH-INV-007": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-007"
+    ]
+  },
+  "BENCH-INV-008": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-008"
+    ]
+  },
+  "BENCH-INV-009": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-009"
+    ]
+  },
+  "BENCH-INV-010": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-010"
+    ]
+  },
+  "BENCH-INV-011": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-011"
+    ]
+  },
+  "BENCH-INV-012": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-012"
+    ]
+  },
+  "BENCH-INV-013": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-013"
+    ]
+  },
+  "BENCH-INV-014": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-014"
+    ]
+  },
+  "BENCH-INV-015": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-015"
+    ]
+  },
+  "BENCH-INV-016": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-016"
+    ]
+  },
+  "BENCH-INV-017": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-017"
+    ]
+  },
+  "BENCH-INV-018": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-018"
+    ]
+  },
+  "BENCH-INV-019": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-019"
+    ]
+  },
+  "BENCH-INV-020": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-020"
+    ]
+  },
+  "BENCH-INV-021": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-021"
+    ]
+  },
+  "BENCH-INV-022": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-022"
+    ]
+  },
+  "BENCH-INV-023": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-023"
+    ]
+  },
+  "BENCH-INV-024": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-024"
+    ]
+  },
+  "BENCH-INV-025": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-025"
+    ]
+  },
+  "BENCH-INV-026": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-026"
+    ]
+  },
+  "BENCH-INV-027": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-027"
+    ]
+  },
+  "BENCH-INV-028": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-028"
+    ]
+  },
+  "BENCH-INV-029": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-029"
+    ]
+  },
+  "BENCH-INV-030": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-030"
+    ]
+  },
+  "BENCH-INV-031": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-032": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-033": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-034": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-035": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-035"
+    ]
+  },
+  "BENCH-INV-036": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-036"
+    ]
+  },
+  "BENCH-INV-037": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-037"
+    ]
+  },
+  "BENCH-INV-038": {
+    "expected_match_type": "SINGLE",
+    "expected_transaction_ids": [
+      "BENCH-TXN-038"
+    ]
+  },
+  "BENCH-INV-039": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-040": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-041": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-042": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-043": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-044": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-045": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-046": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-047": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-048": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-049": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  },
+  "BENCH-INV-050": {
+    "expected_match_type": "NONE",
+    "expected_transaction_ids": []
+  }
+}

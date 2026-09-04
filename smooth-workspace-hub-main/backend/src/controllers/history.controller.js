@@ -89,6 +89,7 @@ async function loadRun(runId, userId) {
   return {
       run: {
       runId: run.run_id, sessionId: run.session_display_id || run.session_id, version: Number(run.version || 1), status: run.status,
+      mode: run.mode || 'SINGLE', parentRunId: run.parent_run_id || null, metrics: json(run.metrics),
       createdAt: run.started_at, completedAt: run.completed_at, processingTimeMs: run.processing_time_ms,
       averageProcessingTimeMs: run.average_processing_time_ms, averageConfidence: Number(run.average_confidence || 0),
       matchRate: Number(run.match_rate || 0)
@@ -119,7 +120,7 @@ const list = asyncHandler(async (req, res) => {
   if (req.query.status) query.where('status', String(req.query.status));
   const runs = await query.orderBy('r.started_at', 'desc').limit(limit).offset((page - 1) * limit);
   return res.json({ success: true, data: { runs: runs.map((run) => ({
-    run_id: run.run_id, session_id: run.session_display_id || run.session_id, version: Number(run.version || 1), created_at: run.started_at,
+    run_id: run.run_id, session_id: run.session_display_id || run.session_id, version: Number(run.version || 1), mode: run.mode || 'SINGLE', created_at: run.started_at,
     total_invoices: Number(run.total_invoices || 0), auto_matched: Number(run.auto_matched_count || 0),
     manual_review: Number(run.manual_review_count || 0), unmatched: Number(run.unmatched_count || 0),
     exceptions: Number(run.exception_count || 0), match_rate: Number(run.match_rate || 0), average_confidence: Number(run.average_confidence || 0), processing_time_ms: run.processing_time_ms == null ? null : Number(run.processing_time_ms)
@@ -138,7 +139,7 @@ const sessionHistory = asyncHandler(async (req, res) => {
 const recheck = asyncHandler(async (req, res) => {
   const run = await db('reconciliation_runs').where({ run_id: req.params.runId, user_id: req.currentUserId }).first();
   if (!run) throw new AppError('RUN_NOT_FOUND', 'Reconciliation run was not found.', 404);
-  const result = await runReconciliation(run.session_id, req.currentUserId);
+  const result = await runReconciliation(run.session_id, req.currentUserId, { parentRunId: run.run_id });
   return res.status(201).json({ success: true, data: result });
 });
 

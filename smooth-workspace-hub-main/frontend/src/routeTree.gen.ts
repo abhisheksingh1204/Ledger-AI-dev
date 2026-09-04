@@ -10,14 +10,22 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as CashForecastRouteImport } from './routes/cash-forecast'
 import { Route as QaRouteImport } from './routes/qa'
 import { Route as ReconciliationRouteImport } from './routes/reconciliation'
+import { Route as TaxValidationRouteImport } from './routes/tax-validation'
+import { Route as ReconciliationBatchRouteImport } from './routes/reconciliation.batch'
 import { Route as ReconciliationHistoryRouteImport } from './routes/reconciliation.history'
 import { Route as ReconciliationHistoryRunIdRouteImport } from './routes/reconciliation.history.$runId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CashForecastRoute = CashForecastRouteImport.update({
+  id: '/cash-forecast',
+  path: '/cash-forecast',
   getParentRoute: () => rootRouteImport,
 } as any)
 const QaRoute = QaRouteImport.update({
@@ -29,6 +37,16 @@ const ReconciliationRoute = ReconciliationRouteImport.update({
   id: '/reconciliation',
   path: '/reconciliation',
   getParentRoute: () => rootRouteImport,
+} as any)
+const TaxValidationRoute = TaxValidationRouteImport.update({
+  id: '/tax-validation',
+  path: '/tax-validation',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReconciliationBatchRoute = ReconciliationBatchRouteImport.update({
+  id: '/batch',
+  path: '/batch',
+  getParentRoute: () => ReconciliationRoute,
 } as any)
 const ReconciliationHistoryRoute = ReconciliationHistoryRouteImport.update({
   id: '/history',
@@ -44,23 +62,32 @@ const ReconciliationHistoryRunIdRoute =
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/cash-forecast': typeof CashForecastRoute
   '/qa': typeof QaRoute
   '/reconciliation': typeof ReconciliationRouteWithChildren
+  '/tax-validation': typeof TaxValidationRoute
+  '/reconciliation/batch': typeof ReconciliationBatchRoute
   '/reconciliation/history': typeof ReconciliationHistoryRouteWithChildren
   '/reconciliation/history/$runId': typeof ReconciliationHistoryRunIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/cash-forecast': typeof CashForecastRoute
   '/qa': typeof QaRoute
   '/reconciliation': typeof ReconciliationRouteWithChildren
+  '/tax-validation': typeof TaxValidationRoute
+  '/reconciliation/batch': typeof ReconciliationBatchRoute
   '/reconciliation/history': typeof ReconciliationHistoryRouteWithChildren
   '/reconciliation/history/$runId': typeof ReconciliationHistoryRunIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/cash-forecast': typeof CashForecastRoute
   '/qa': typeof QaRoute
   '/reconciliation': typeof ReconciliationRouteWithChildren
+  '/tax-validation': typeof TaxValidationRoute
+  '/reconciliation/batch': typeof ReconciliationBatchRoute
   '/reconciliation/history': typeof ReconciliationHistoryRouteWithChildren
   '/reconciliation/history/$runId': typeof ReconciliationHistoryRunIdRoute
 }
@@ -68,30 +95,41 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/cash-forecast'
     | '/qa'
     | '/reconciliation'
+    | '/tax-validation'
+    | '/reconciliation/batch'
     | '/reconciliation/history'
     | '/reconciliation/history/$runId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/cash-forecast'
     | '/qa'
     | '/reconciliation'
+    | '/tax-validation'
+    | '/reconciliation/batch'
     | '/reconciliation/history'
     | '/reconciliation/history/$runId'
   id:
     | '__root__'
     | '/'
+    | '/cash-forecast'
     | '/qa'
     | '/reconciliation'
+    | '/tax-validation'
+    | '/reconciliation/batch'
     | '/reconciliation/history'
     | '/reconciliation/history/$runId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CashForecastRoute: typeof CashForecastRoute
   QaRoute: typeof QaRoute
   ReconciliationRoute: typeof ReconciliationRouteWithChildren
+  TaxValidationRoute: typeof TaxValidationRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -101,6 +139,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/'
       preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/cash-forecast': {
+      id: '/cash-forecast'
+      path: '/cash-forecast'
+      fullPath: '/cash-forecast'
+      preLoaderRoute: typeof CashForecastRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/qa': {
@@ -116,6 +161,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/reconciliation'
       preLoaderRoute: typeof ReconciliationRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/tax-validation': {
+      id: '/tax-validation'
+      path: '/tax-validation'
+      fullPath: '/tax-validation'
+      preLoaderRoute: typeof TaxValidationRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/reconciliation/batch': {
+      id: '/reconciliation/batch'
+      path: '/batch'
+      fullPath: '/reconciliation/batch'
+      preLoaderRoute: typeof ReconciliationBatchRouteImport
+      parentRoute: typeof ReconciliationRoute
     }
     '/reconciliation/history': {
       id: '/reconciliation/history'
@@ -148,10 +207,12 @@ const ReconciliationHistoryRouteWithChildren =
   )
 
 interface ReconciliationRouteChildren {
+  ReconciliationBatchRoute: typeof ReconciliationBatchRoute
   ReconciliationHistoryRoute: typeof ReconciliationHistoryRouteWithChildren
 }
 
 const ReconciliationRouteChildren: ReconciliationRouteChildren = {
+  ReconciliationBatchRoute: ReconciliationBatchRoute,
   ReconciliationHistoryRoute: ReconciliationHistoryRouteWithChildren,
 }
 
@@ -161,8 +222,10 @@ const ReconciliationRouteWithChildren = ReconciliationRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CashForecastRoute: CashForecastRoute,
   QaRoute: QaRoute,
   ReconciliationRoute: ReconciliationRouteWithChildren,
+  TaxValidationRoute: TaxValidationRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

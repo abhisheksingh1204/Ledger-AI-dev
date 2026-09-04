@@ -339,6 +339,10 @@ async function callOcrWithFallback(document) {
 function buildInvoiceRow(document, extraction) {
   const invoice = extraction.invoice || {};
   const invoiceNumber = invoice.invoice_number || getInvoiceDocumentNumber(document);
+  const extractedCurrency = String(invoice.currency || '').trim().toUpperCase();
+  const currency = /^[A-Z]{3}$/.test(extractedCurrency)
+    ? extractedCurrency
+    : String(process.env.APP_DEFAULT_CURRENCY || 'INR').toUpperCase();
 
   return {
     invoice_id: invoiceNumber,
@@ -353,7 +357,7 @@ function buildInvoiceRow(document, extraction) {
     tax_amount: toMoneyString(invoice.tax_amount || null),
     invoice_date: invoice.invoice_date || null,
     due_date: invoice.due_date || null,
-    currency: invoice.currency || null,
+    currency,
     payment_reference: invoice.payment_reference || invoice.purchase_order_reference || null,
     status: 'EXTRACTED',
     created_at: db.fn.now(),
@@ -584,12 +588,12 @@ async function processSingleDocument(documentId, userId) {
 
 async function processSessionDocuments(sessionId, userId) {
   const { session, documents } = await getDocumentsForProcessingBySessionId(sessionId, userId);
-  const invoiceDocument = documents.find((document) => document.document_type === 'INVOICE');
+  const invoiceDocuments = documents.filter((document) => document.document_type === 'INVOICE');
   const bankStatementDocument = documents.find(
     (document) => document.document_type === 'BANK_STATEMENT'
   );
 
-  if (!invoiceDocument || !bankStatementDocument) {
+  if (!invoiceDocuments.length || !bankStatementDocument) {
     throw new AppError(
       'SESSION_DOCUMENTS_MISSING',
       'Both an invoice and a bank statement must be uploaded before processing the session.',
@@ -598,26 +602,29 @@ async function processSessionDocuments(sessionId, userId) {
   }
 
   const results = [];
-
-  for (const document of [invoiceDocument, bankStatementDocument]) {
-    try {
-      const result = await processSingleDocument(document.document_id, userId);
-      results.push({
-        ...result,
-        success: true
-      });
-    } catch (error) {
-      results.push({
-        documentId: document.document_id,
-        documentType: document.document_type,
-        success: false,
-        error: {
-          code: error.code || 'DOCUMENT_PROCESSING_FAILED',
-          message: error.message
-        }
-      });
+  const concurrency = session.mode === 'BATCH' ? Math.max(1, Number(process.env.BATCH_OCR_CONCURRENCY || 2)) : 1;
+  let nextIndex = 0;
+  await updateSessionStatusById({ sessionDbId: session.id, status: 'PROCESSING_DOCUMENTS' });
+  async function worker() {
+    while (nextIndex < invoiceDocuments.length) {
+      const document = invoiceDocuments[nextIndex++];
+      try {
+        results.push({ ...(await processSingleDocument(document.document_id, userId)), success: true });
+      } catch (error) {
+        results.push({ documentId: document.document_id, documentType: document.document_type, success: false, error: { code: error.code || 'DOCUMENT_PROCESSING_FAILED', message: error.message } });
+        await db('exceptions').insert({ session_id: session.id, exception_type: 'DOCUMENT_PROCESSING_FAILED', severity: 'HIGH', description: `${document.original_filename}: ${error.message}` });
+      }
     }
   }
+  await Promise.all(Array.from({ length: Math.min(concurrency, invoiceDocuments.length) }, () => worker()));
+  try {
+    results.push({ ...(await processSingleDocument(bankStatementDocument.document_id, userId)), success: true });
+  } catch (error) {
+    results.push({ documentId: bankStatementDocument.document_id, documentType: bankStatementDocument.document_type, success: false, error: { code: 'BANK_DOCUMENT_PROCESSING_FAILED', message: error.message } });
+    await updateSessionStatusById({ sessionDbId: session.id, status: 'FAILED' });
+    return { sessionId: session.session_id, results };
+  }
+  await updateSessionStatusById({ sessionDbId: session.id, status: results.some((item) => !item.success) ? 'PARTIAL_FAILURE' : 'READY_FOR_RECONCILIATION' });
 
   return {
     sessionId: session.session_id,

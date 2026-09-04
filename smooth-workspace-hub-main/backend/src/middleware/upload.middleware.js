@@ -36,8 +36,22 @@ const uploadReconciliationDocuments = upload.fields([
   { name: 'bankStatement', maxCount: 1 }
 ]);
 
+const batchUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_FILE_SIZE_BYTES, files: 101 },
+  fileFilter: (req, file, cb) => {
+    if (!ALLOWED_MIME_TYPES.has(file.mimetype)) return cb(new AppError('INVALID_FILE_TYPE', 'Only PDF, PNG and JPEG documents are supported.', 400));
+    return cb(null, true);
+  }
+});
+const uploadBatchDocuments = batchUpload.fields([
+  { name: 'invoices', maxCount: 100 },
+  { name: 'bankStatement', maxCount: 1 }
+]);
+
 module.exports = {
   MAX_FILE_SIZE_BYTES,
   uploadReconciliationDocuments,
+  uploadBatchDocuments,
   uploadInvoice: upload.single('invoice')
 };

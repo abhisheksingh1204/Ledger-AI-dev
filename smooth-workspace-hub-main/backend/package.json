@@ -7,6 +7,8 @@
   "scripts": {
     "dev": "nodemon src/server.js",
     "start": "node src/server.js",
+    "seed:forecast-demo": "node scripts/seed-cash-forecast-demo.js",
+    "benchmark:batch": "node scripts/generate-batch-benchmark.js",
     "migrate:latest": "knex --knexfile knexfile.js migrate:latest",
     "migrate:rollback": "knex --knexfile knexfile.js migrate:rollback",
     "test:phase3": "node --test test/reconciliation.service.test.js",

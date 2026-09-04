@@ -250,7 +250,7 @@ function findPaymentCombination(invoice, candidates, limit = 3) {
   return found;
 }
 
-async function runReconciliation(sessionId, userId) {
+async function runReconciliation(sessionId, userId, options = {}) {
   const session = await db('reconciliation_sessions').where({ session_id: sessionId, user_id: userId }).first();
   if (!session) { const e = new Error('Reconciliation session not found.'); e.statusCode = 404; throw e; }
   const invoices = await db('invoices').where({ session_id: session.id, user_id: userId });
@@ -264,7 +264,7 @@ async function runReconciliation(sessionId, userId) {
     const [run] = await trx('reconciliation_runs').insert({
       run_id: `RUN-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       session_id: session.id, user_id: userId, version, status: 'RUNNING',
-      weights: WEIGHTS, thresholds: { auto: CONFIG.auto, review: CONFIG.review }
+      mode: session.mode || 'SINGLE', parent_run_id: options.parentRunId || null, weights: WEIGHTS, thresholds: { auto: CONFIG.auto, review: CONFIG.review },
     }).returning('*');
     runId = run.run_id;
     await trx('audit_log').insert({ action: 'RECONCILIATION_STARTED', table_name: 'reconciliation_runs', record_id: run.id, user_id: userId, new_value: { sessionId } });
@@ -383,7 +383,20 @@ async function runReconciliation(sessionId, userId) {
        auto_matched_count: summary.autoMatched, manual_review_count: summary.manualReview,
        unmatched_count: summary.unmatched, exception_count: Number(persistedExceptionCount || 0),
        average_confidence: averageConfidence.toFixed(2), match_rate: matchRate.toFixed(2),
-       processing_time_ms: processingTime, average_processing_time_ms: invoices.length ? (processingTime / invoices.length).toFixed(2) : 0
+       processing_time_ms: processingTime, average_processing_time_ms: invoices.length ? (processingTime / invoices.length).toFixed(2) : 0,
+       metrics: {
+         total_invoices: invoices.length, processed_invoices: results.length,
+         failed_invoices: 0, bank_transactions: transactions.length,
+         auto_matched: summary.autoMatched, manual_review: summary.manualReview,
+         unmatched: summary.unmatched, exception_count: Number(persistedExceptionCount || 0),
+         no_candidate_count: results.filter((item) => item.warnings?.some((warning) => warning.type === 'NO_TRANSACTION_FOUND')).length,
+         match_rate: invoices.length ? (summary.autoMatched / results.length) * 100 : 0,
+         candidate_coverage: invoices.length ? ((summary.autoMatched + summary.manualReview) / results.length) * 100 : 0,
+         average_confidence: averageConfidence, reconciliation_time_ms: processingTime,
+         total_processing_time_ms: processingTime,
+         reconciliation_throughput: processingTime ? results.length / (processingTime / 1000) : 0,
+         end_to_end_throughput: processingTime ? results.length / (processingTime / 1000) : 0
+       }
      });
      await trx('reconciliation_sessions').where({ id: session.id, user_id: userId }).update({ status: 'RECONCILED', updated_at: trx.fn.now() });
     await trx('audit_log').insert({ action: 'RECONCILIATION_COMPLETED', table_name: 'reconciliation_runs', record_id: run.id, user_id: userId, new_value: { sessionId } });

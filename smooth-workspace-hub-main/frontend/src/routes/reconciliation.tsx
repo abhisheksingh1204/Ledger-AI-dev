@@ -1,6 +1,6 @@
-import { Link, Outlet, createFileRoute, useLocation } from "@tanstack/react-router";
+import { Link, Outlet, createFileRoute, useLocation, useNavigate } from "@tanstack/react-router";
 import { motion } from "framer-motion";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { WorkspaceBackground } from "@/components/site/BackgroundLayer";
 import { Footer } from "@/components/site/Footer";
@@ -9,6 +9,8 @@ import { LoadingScreen } from "@/components/site/LoadingScreen";
 import { EASE_PREMIUM } from "@/lib/site";
 import {
   createSession,
+  createBatchSession,
+  getBatchStatus,
   getDocumentView,
   getExceptions,
   getInvoiceReconciliation,
@@ -16,6 +18,8 @@ import {
   processSession,
   runReconciliation,
   uploadDocuments,
+  uploadBatchDocuments,
+  type BatchStatus,
   type ReconciliationResult,
   type ReportOverview,
 } from "@/lib/financeApi";
@@ -55,11 +59,47 @@ function statusLabel(value: string) {
   return value.replaceAll("_", " ");
 }
 
+const acceptedFileTypes = ["application/pdf", "image/png", "image/jpeg"];
+const acceptedExtensions = [".pdf", ".png", ".jpg", ".jpeg"];
+
+function isAcceptedFile(file: File) {
+  const name = file.name.toLowerCase();
+  return acceptedFileTypes.includes(file.type) || acceptedExtensions.some((extension) => name.endsWith(extension));
+}
+
+function fileKey(file: File) {
+  return `${file.name}|${file.size}|${file.lastModified}`;
+}
+
+function BatchProgressPanel({ progress, total }: { progress: BatchStatus | null; total: number }) {
+  const completed = progress?.processing_completed || 0;
+  const failed = progress?.processing_failed || 0;
+  const processed = completed + failed;
+  const percent = total ? Math.round((processed / total) * 100) : 0;
+  return (
+    <div className="glass-panel-solid rounded-2xl p-8 max-w-2xl mx-auto" aria-live="polite">
+      <div className="flex justify-between gap-4 mb-3">
+        <h2 className="font-headline-md text-primary">Batch reconciliation in progress</h2>
+        <span className="text-sm text-secondary">{percent}%</span>
+      </div>
+      <div className="h-3 rounded-full bg-surface-container-high overflow-hidden" role="progressbar" aria-valuenow={percent} aria-valuemin={0} aria-valuemax={100}>
+        <div className="h-full bg-secondary transition-all" style={{ width: `${percent}%` }} />
+      </div>
+      <p className="text-sm text-on-surface-variant mt-4">
+        {completed} of {total} invoices processed{failed ? `, ${failed} failed` : ""}.
+      </p>
+      <p className="text-sm text-on-surface-variant mt-2">{progress ? statusLabel(progress.current_stage) : "Uploading documents"}...</p>
+      {failed ? <p className="text-sm text-error mt-4">Some invoices failed processing and were excluded from matching.</p> : null}
+    </div>
+  );
+}
+
 function ReconciliationPage() {
   const location = useLocation();
   if (location.pathname === "/reconciliation/history" || location.pathname.startsWith("/reconciliation/history/")) {
     return <Outlet />;
   }
+  const navigate = useNavigate();
 
   const [invoice, setInvoice] = useState<File | null>(null);
   const [bankStatement, setBankStatement] = useState<File | null>(null);
@@ -77,8 +117,87 @@ function ReconciliationPage() {
   const [runWeights, setRunWeights] = useState<Record<string, number>>({});
   const [exceptions, setExceptions] = useState<Array<{ id: number; exception_type: string; severity: string; description: string; created_at: string; resolved_at?: string | null; invoice_id?: string; transaction_id?: string }>>([]);
   const [detail, setDetail] = useState<Awaited<ReturnType<typeof getInvoiceReconciliation>>["data"] | null>(null);
+  const [mode, setMode] = useState<"SINGLE" | "BATCH">("SINGLE");
+  const [batchInvoices, setBatchInvoices] = useState<File[]>([]);
+  const [batchBankStatement, setBatchBankStatement] = useState<File | null>(null);
+  const [batchWarnings, setBatchWarnings] = useState<string[]>([]);
+  const [batchProgress, setBatchProgress] = useState<BatchStatus | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [showBatchFiles, setShowBatchFiles] = useState(false);
+  const poller = useRef<number | null>(null);
+
+  useEffect(() => () => {
+    if (poller.current) window.clearInterval(poller.current);
+  }, []);
+
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).get("mode") === "batch") setMode("BATCH");
+  }, []);
+
+  const addBatchInvoices = (files: File[]) => {
+    const warnings: string[] = [];
+    const seen = new Set(batchInvoices.map(fileKey));
+    const additions: File[] = [];
+    for (const file of files) {
+      if (!isAcceptedFile(file)) {
+        warnings.push(`Skipped invalid file: ${file.name}`);
+      } else if (seen.has(fileKey(file))) {
+        warnings.push(`Duplicate file skipped: ${file.name}`);
+      } else if (batchInvoices.length + additions.length >= 100) {
+        warnings.push(`Omitted file because the 100-invoice limit was reached: ${file.name}`);
+      } else {
+        seen.add(fileKey(file));
+        additions.push(file);
+      }
+    }
+    setBatchInvoices((current) => [...current, ...additions]);
+    setBatchWarnings(warnings);
+  };
+
+  const removeBatchInvoice = (key: string) => setBatchInvoices((files) => files.filter((file) => fileKey(file) !== key));
 
   const start = async () => {
+    if (mode === "BATCH") {
+      if (!batchInvoices.length || !batchBankStatement) {
+        setError("Select at least one invoice and one bank statement before starting.");
+        return;
+      }
+      setError("");
+      setBatchRunning(true);
+      let stage = "creating the batch session";
+      let sessionId = "";
+      try {
+        const created = await createBatchSession();
+        sessionId = created.session.sessionId;
+        window.history.replaceState({}, "", `/reconciliation?mode=batch&sessionId=${encodeURIComponent(sessionId)}`);
+        stage = "uploading the batch documents";
+        await uploadBatchDocuments(sessionId, batchInvoices, batchBankStatement);
+        const refresh = async () => {
+          const response = await getBatchStatus(sessionId);
+          setBatchProgress(response.data);
+        };
+        await refresh();
+        poller.current = window.setInterval(() => void refresh(), 2500);
+        stage = "processing the batch documents";
+        const processed = await processSession(sessionId);
+        const bankFailure = processed.data.results.find((item) => !item.success && item.documentType === "BANK_STATEMENT");
+        if (bankFailure) throw new Error(bankFailure.error?.message || "Bank statement processing failed.");
+        stage = "running reconciliation";
+        const reconciled = await runReconciliation(sessionId);
+        if (poller.current) window.clearInterval(poller.current);
+        if (reconciled.data.runId) {
+          await navigate({ to: "/reconciliation/history/$runId", params: { runId: reconciled.data.runId } });
+        } else {
+          setError("The batch completed without a persisted reconciliation run.");
+        }
+      } catch (requestError) {
+        if (poller.current) window.clearInterval(poller.current);
+        setError(`Batch reconciliation failed while ${stage}: ${requestError instanceof Error ? requestError.message : String(requestError)}`);
+      } finally {
+        setBatchRunning(false);
+      }
+      return;
+    }
     if (!invoice || !bankStatement) {
       setError("Select both an invoice and a bank statement before starting.");
       return;
@@ -278,6 +397,8 @@ function ReconciliationPage() {
                 </div>
               ) : null}
             </motion.div>
+          ) : batchRunning ? (
+            <BatchProgressPanel progress={batchProgress} total={batchInvoices.length} />
           ) : (
             <motion.div
               initial={{ opacity: 0, y: 16 }}
@@ -294,18 +415,40 @@ function ReconciliationPage() {
                   Initialize Reconciliation
                 </h1>
                 <p className="text-body-lg text-on-surface-variant max-w-2xl mx-auto">
-                  Upload an invoice and bank statement to run OCR, extraction, reconciliation and
-                  reporting.
+                  Choose a workflow, then upload your source documents to run OCR, extraction, reconciliation and reporting.
                 </p>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-gutter mb-10">
-                <Dropzone title="Upload Invoice" file={invoice} onFile={setInvoice} />
-                <Dropzone
-                  title="Upload Bank Statement"
-                  file={bankStatement}
-                  onFile={setBankStatement}
-                />
+              <div className="flex justify-center gap-2 mb-10" role="tablist" aria-label="Reconciliation mode">
+                {(["SINGLE", "BATCH"] as const).map((option) => (
+                  <button key={option} type="button" role="tab" aria-selected={mode === option} onClick={() => { setMode(option); setError(""); }} className={`px-5 py-3 rounded-full border text-sm ${mode === option ? "bg-secondary text-on-secondary border-secondary" : "border-outline-variant text-on-surface-variant"}`}>
+                    {option === "SINGLE" ? "Single Reconciliation" : "Batch Reconciliation"}
+                  </button>
+                ))}
               </div>
+              {mode === "SINGLE" ? <div className="grid grid-cols-1 md:grid-cols-2 gap-gutter mb-10">
+                <Dropzone title="Upload Invoice" file={invoice} onFile={setInvoice} />
+                <Dropzone title="Upload Bank Statement" file={bankStatement} onFile={setBankStatement} />
+              </div> : <div className="grid grid-cols-1 md:grid-cols-2 gap-gutter mb-10">
+                <label className="glass-panel-solid rounded-card p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:border-secondary">
+                  <span className="material-symbols-outlined filled text-4xl text-secondary mb-5">upload_file</span>
+                  <h2 className="font-headline-md text-primary mb-2">Upload Invoices</h2>
+                  <p className="font-body-md text-on-surface-variant mb-4">PDF, PNG or JPEG, up to 100 files</p>
+                  <span className="px-5 py-3 rounded-full border border-outline-variant text-sm text-on-surface-variant">Select invoice files</span>
+                  <input className="hidden" type="file" multiple accept=".pdf,.png,.jpg,.jpeg,application/pdf,image/png,image/jpeg" onChange={(event) => { addBatchInvoices(Array.from(event.target.files || [])); event.currentTarget.value = ""; }} />
+                  <span className="text-sm text-secondary mt-5">{batchInvoices.length} / 100 selected</span>
+                </label>
+                <Dropzone title="Upload Bank Statement" file={batchBankStatement} onFile={(file) => setBatchBankStatement(file && isAcceptedFile(file) ? file : null)} />
+                <div className="md:col-span-2 glass-panel-solid rounded-2xl p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <button type="button" className="text-sm text-secondary hover:underline" onClick={() => setShowBatchFiles((visible) => !visible)} aria-expanded={showBatchFiles}>
+                      {showBatchFiles ? "Hide selected files" : `View selected files (${batchInvoices.length})`}
+                    </button>
+                    {batchInvoices.length ? <button type="button" className="text-sm text-error hover:underline" onClick={() => setBatchInvoices([])}>Clear all</button> : null}
+                  </div>
+                  <div className="mt-4 space-y-2">{(showBatchFiles ? batchInvoices : batchInvoices.slice(0, 5)).map((file) => <div key={fileKey(file)} className="flex justify-between gap-3 text-sm"><span className="truncate">{file.name}</span><button type="button" className="text-error shrink-0" onClick={() => removeBatchInvoice(fileKey(file))} aria-label={`Remove ${file.name}`}>Remove</button></div>)}{!showBatchFiles && batchInvoices.length > 5 ? <p className="text-sm text-on-surface-variant">+{batchInvoices.length - 5} more</p> : null}</div>
+                  {batchWarnings.length ? <div role="status" className="mt-4 text-sm text-error">{batchWarnings.join(" ")}</div> : null}
+                </div>
+              </div>}
               {error ? (
                 <p role="alert" className="text-error text-center mb-5">
                   {error}

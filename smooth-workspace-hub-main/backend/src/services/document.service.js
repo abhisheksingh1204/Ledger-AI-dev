@@ -22,13 +22,14 @@ async function insertAuditLog(entry, trx = db) {
   await trx('audit_log').insert(payload);
 }
 
-async function createReconciliationSession({ userId }, trx = db) {
+async function createReconciliationSession({ userId, mode = 'SINGLE' }, trx = db) {
   const sessionId = generateSessionId();
   const [session] = await trx('reconciliation_sessions')
     .insert({
       session_id: sessionId,
       user_id: userId,
       status: 'CREATED',
+      mode,
       created_at: trx.fn.now(),
       updated_at: trx.fn.now()
     })
